@@ -240,3 +240,27 @@ class Handoff(BaseModel):
     escalations: list[str] = Field(default_factory=list)
     acknowledged_at: datetime | None = None
     completed_at: datetime | None = None
+
+
+# ---------------------------------------------------------------- inventory (R2)
+
+class InventoryEventType(str, Enum):
+    RECEIPT = "receipt"
+    DECANT = "decant"
+    TRANSFER = "transfer"          # inter-node transfer out of node_id towards to_node
+    PICK = "pick"
+    ADJUSTMENT = "adjustment"      # signed quantity
+    REMOVAL = "removal"
+    PHYSICAL_COUNT = "physical_count"
+
+
+class InventoryEvent(BaseModel):
+    event_id: str
+    type: InventoryEventType
+    sku: str
+    node_id: str
+    quantity: int
+    occurred_at: datetime
+    source_party: OwningParty
+    to_node: str | None = None
+    transfer_id: str | None = None
