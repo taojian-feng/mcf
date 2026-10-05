@@ -1,6 +1,6 @@
 # MCF Agentic Fulfillment Orchestration: Architecture (Azure first, multi-cloud ready)
 
-Status: draft v0.1 (2026-10-05). Source: `# Requirements Document Agentic Fulfillment Orchestration system.md` (R1 to R11).
+Status: draft v0.2 (2026-10-05). Source: `# Requirements Document Agentic Fulfillment Orchestration system.md` (R1 to R11).
 
 ## 1. Design principles
 
@@ -122,7 +122,7 @@ mcf-system/
   mcf/
     core/        ports.py, models.py, events.py, config.py   (no cloud imports)
     services/    audit, approval, governance, integration, handoffs
-    agents/      orchestration, exception (slice); planning, reconciliation, disposition, reporting (stubs)
+    agents/      orchestration, exception, planning, reconciliation, disposition, reporting
     adapters/
       memory/    in-process bus with virtual time, stores, ledger, notifier, fake MCF API
       azure/     Service Bus, Cosmos, Blob, SQL ledger, Key Vault, Entra, Foundry LLM

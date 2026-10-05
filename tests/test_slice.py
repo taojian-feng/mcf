@@ -207,7 +207,7 @@ def test_approval_reminders_and_missing_approver(system):
     assert system.approvals.get(case["approval_id"]).reminders_sent == 2
     assert system.approvals.get(case["approval_id"]).status.value == "pending"
 
-    item = system.approvals.submit(category=ApprovalCategory.DISTRIBUTION_PLAN, owning_party=OwningParty.CORP_B,
+    item = system.approvals.submit(category=ApprovalCategory.DISTRIBUTION_PLAN, owning_party=OwningParty.CORP_A,
                                    agent="planning_agent", subject_id="dp-1", content={}, rationale="draft")
     assert item.routed_to == [] and system.ports.notifier.to("gov@corpb")      # R8.8
 

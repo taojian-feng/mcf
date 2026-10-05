@@ -24,6 +24,20 @@ class RetryPolicy(BaseModel):
     max_retries: int = 5  # R7.4: 1s, 2s, 4s, 8s, 16s
 
 
+class NodeInfo(BaseModel):
+    node_id: str
+    kind: str  # ISC | IXD | FC
+    region: str | None = None  # FCs serve a demand region; ISC/IXD serve the network
+
+
+def _default_nodes() -> dict[str, NodeInfo]:
+    nodes = [NodeInfo(node_id="ISC-X", kind="ISC"), NodeInfo(node_id="ISC-Y", kind="ISC"),
+             NodeInfo(node_id="IXD-1", kind="IXD"),
+             NodeInfo(node_id="FC-WEST", kind="FC", region="west"),
+             NodeInfo(node_id="FC-EAST", kind="FC", region="east")]
+    return {n.node_id: n for n in nodes}
+
+
 class PilotConfig(BaseModel):
     pilot_upcs: set[str] = Field(default_factory=set)  # 1,360 UPCs loaded from master data
     eligible_states: set[str] = Field(default_factory=lambda: set(US48))
@@ -68,7 +82,52 @@ class PilotConfig(BaseModel):
             "reship_order": OwningParty.CORP_A,
             "return_intercept": OwningParty.CORP_A,
             "approve_exception_resolution": OwningParty.CORP_B,
+            "update_inventory_state": OwningParty.CORP_A,
+            "reconcile_inventory": OwningParty.CORP_A,
+            "transmit_decant_counts": OwningParty.CORP_A,
+            "plan_demand": OwningParty.CORP_B,
+            "recommend_replenishment": OwningParty.CORP_B,
+            "approve_replenishment": OwningParty.CORP_B,
+            "approve_distribution_plan": OwningParty.CORP_B,
+            "execute_transfer": OwningParty.CORP_A,
+            "monitor_aging": OwningParty.CORP_B,
+            "approve_disposition": OwningParty.CORP_B,
+            "execute_disposition": OwningParty.CORP_A,
+            "compute_metrics": OwningParty.CORP_B,
         }
     )
     handoff_ack_window: timedelta = timedelta(hours=4)
     handoff_default_due: timedelta = timedelta(hours=24)
+
+    # Master data: fulfillment nodes
+    nodes: dict[str, NodeInfo] = Field(default_factory=_default_nodes)
+
+    # R1 planning
+    min_cover_days: float = 14
+    target_cover_days: float = 28
+    imbalance_threshold: float = 0.25          # |position - projection| / projection
+    imbalance_horizon_days: int = 28
+    cold_start_replace_weeks: int = 4
+    replenishment_value_threshold: float = 25_000.0
+    unit_cost: dict[str, float] = Field(default_factory=dict)  # per UPC; default_unit_cost otherwise
+    default_unit_cost: float = 60.0
+    feed_delivery_window: timedelta = timedelta(days=7, hours=12)
+    replenishment_cooldown: timedelta = timedelta(hours=24)
+
+    # R2 reconciliation
+    discrepancy_threshold_units: int = 2
+    history_retention: timedelta = timedelta(days=365)
+
+    # R4 disposition
+    aging_thresholds_days: list[int] = Field(default_factory=lambda: [60, 90])
+    disposition_threshold_days: int = 120
+    storage_cost_per_unit_day: float = 0.05
+    rebound_cost_per_unit: float = 2.50
+    removal_cost_per_unit: float = 1.75
+    avoided_cost_horizon_days: int = 90
+    disposition_completion_window: timedelta = timedelta(days=14)
+    disposition_rerecommend_after: timedelta = timedelta(days=30)
+
+    # R6 reporting
+    anomaly_threshold: float = 0.20            # relative deviation from trailing 4-week mean
+    baseline_days: int = 28

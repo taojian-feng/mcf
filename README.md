@@ -9,7 +9,7 @@ pip install pydantic pytest
 python -m pytest            # runs the order-to-exception slice in memory with virtual time
 ```
 
-## What exists today (v0.1)
+## What exists today (v0.2)
 
 | Area | Status | Requirements covered |
 |---|---|---|
@@ -21,9 +21,16 @@ python -m pytest            # runs the order-to-exception slice in memory with v
 | Handoff tracker | done | R11.1 to R11.8 |
 | Orchestration_Agent | done | R5.1 to R5.10 |
 | Exception_Agent | done (rules classifier + Claude on Foundry hook, 6 playbooks) | R3.1 to R3.10 |
-| Planning, Reconciliation, Disposition, Reporting agents | stubs with planned shape | R1, R2, R4, R6 |
+| Reconciliation_Agent | done (event-sourced inventory, FIFO lots, point-in-time replay) | R2.1 to R2.8 |
+| Planning_Agent | done (forecast/sales/cold-start feeds, ATS cover, replenishment, imbalance, distribution plan) | R1.1 to R1.9 |
+| Disposition_Agent | done (aging + storage cost, recommendations, completion tracking) | R4.1 to R4.9 |
+| Reporting_Agent | done (10 metrics, 4-week baselines, CSV export, weekly + QBR summaries) | R6.1 to R6.7 |
 | Azure adapters | written, not yet run against Azure | Service Bus, Cosmos, Blob, SQL ledger, Key Vault, App Configuration, ACS email, Foundry |
-| Azure infra | `infra/azure/main.bicep` compiles; `sql/audit.sql` | |
+| Azure infra | `infra/azure/main.bicep` compiles (incl. Container Apps Jobs for daily/weekly/quarterly work); `sql/audit.sql` | |
+
+Scheduled work runs as `python -m mcf.main job <name>` (reconciliation_daily, planning_daily, disposition_daily, metrics_daily, weekly_summary, qbr_summary).
+
+Simplifications to revisit with the pilot team: demand is modeled per UPC x region per week; replenishment sources FCs from the IXD first, then an ISC; disposition picks the cheaper of Rebound return or removal; replenishment accuracy compares recommended quantity with the next week's actual sales.
 
 Not yet covered: PII retention purge job (R9.5 is set up via Cosmos TTL on `order_pii`), encryption-at-rest specifics (R9.3, platform default plus TLS), audit retention policy (R10.4).
 
@@ -32,11 +39,11 @@ Not yet covered: PII retention purge job (R9.5 is set up via Cosmos TTL on `orde
 ```
 mcf/core        models, ports (interfaces), topics, config       no cloud imports
 mcf/services    audit, approval, governance, integration, handoffs
-mcf/agents      orchestration, exception (+ stubs for the other four)
+mcf/agents      orchestration, exception, reconciliation, planning, disposition, reporting
 mcf/adapters    memory/ (local + tests), azure/, http_mcf.py
 mcf/runtime.py  wires ports to adapters (MCF_CLOUD=memory|azure)
 infra/azure     main.bicep, sql/audit.sql
-tests           test_slice.py (24 scenario tests)
+tests           test_slice.py (order-to-exception), test_agents.py (the other four agents)
 ```
 
 ## Adding GCP or AWS

@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from mcf.agents.disposition import DispositionAgent
 from mcf.agents.exception import Classifier, ExceptionAgent
 from mcf.agents.orchestration import OrchestrationAgent
+from mcf.agents.planning import PlanningAgent
+from mcf.agents.reconciliation import ReconciliationAgent
+from mcf.agents.reporting import ReportingAgent
 from mcf.core.config import PilotConfig
 from mcf.core.ports import (
     LLM, AuditLedger, BlobStore, Clock, Directory, DocumentStore, MCFTransport, MessageBus, Notifier,
@@ -43,6 +48,22 @@ class System:
     handoffs: HandoffService
     orchestration: OrchestrationAgent
     exceptions: ExceptionAgent
+    reconciliation: ReconciliationAgent
+    planning: PlanningAgent
+    disposition: DispositionAgent
+    reporting: ReportingAgent
+
+    def run_job(self, name: str) -> object:
+        """Scheduled jobs (Container Apps Jobs on Azure)."""
+        jobs = {
+            "reconciliation_daily": self.reconciliation.run_daily,
+            "planning_daily": self.planning.run_daily,
+            "disposition_daily": self.disposition.run_daily,
+            "metrics_daily": self.reporting.compute_daily,
+            "weekly_summary": lambda: self.reporting.run_weekly(self.ports.clock.now().date() - timedelta(days=1)),
+            "qbr_summary": lambda: self.reporting.run_quarterly(self.ports.clock.now().date() - timedelta(days=1)),
+        }
+        return jobs[name]()
 
 
 def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] | None = None) -> System:
@@ -57,7 +78,16 @@ def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] |
                                        ports.clock, config)
     exceptions = ExceptionAgent(ports.store, ports.bus, approvals, handoffs, audit, ports.notifier,
                                 ports.directory, ports.clock, config, classifier=Classifier(ports.llm))
-    return System(ports, config, audit, governance, integration, approvals, handoffs, orchestration, exceptions)
+    reconciliation = ReconciliationAgent(ports.store, ports.bus, audit, ports.notifier, ports.directory, ports.clock,
+                                         config)
+    planning = PlanningAgent(ports.store, ports.bus, integration, governance, approvals, handoffs, reconciliation,
+                             audit, ports.notifier, ports.directory, ports.clock, config)
+    disposition = DispositionAgent(ports.store, ports.bus, approvals, handoffs, reconciliation, planning, audit,
+                                   ports.notifier, ports.directory, ports.clock, config)
+    reporting = ReportingAgent(ports.store, ports.bus, ports.blobs, planning, governance, audit, ports.notifier,
+                               ports.directory, ports.clock, config, llm=ports.llm)
+    return System(ports, config, audit, governance, integration, approvals, handoffs, orchestration, exceptions,
+                  reconciliation, planning, disposition, reporting)
 
 
 def memory_ports(**overrides: Any) -> Ports:

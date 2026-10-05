@@ -25,6 +25,11 @@ var topics = [
   'handoffs.events'
   'timers'
   'feeds.arrived'
+  'inventory.events'
+  'inventory.state'
+  'disposition.events'
+  'shipments.facts'
+  'corpb.outbound'
 ]
 // subscriber -> topics it consumes (mirrors bus.subscribe calls in mcf/)
 var subscriptions = [
@@ -32,20 +37,39 @@ var subscriptions = [
   { name: 'exception-agent', topics: [ 'exceptions.signals', 'approvals.decisions', 'handoffs.events', 'timers' ] }
   { name: 'approval-workflow', topics: [ 'timers' ] }
   { name: 'handoff-tracker', topics: [ 'timers' ] }
+  { name: 'reconciliation-agent', topics: [ 'inventory.events' ] }
+  { name: 'planning-agent', topics: [ 'inventory.state', 'approvals.decisions', 'timers' ] }
+  { name: 'disposition-agent', topics: [ 'approvals.decisions', 'disposition.events', 'timers' ] }
+  { name: 'reporting-agent', topics: [ 'shipments.facts' ] }
   { name: 'oms-connector', topics: [ 'oms.outbound' ] }
+  { name: 'corpb-connector', topics: [ 'corpb.outbound' ] }
   { name: 'integration-layer', topics: [ 'feeds.arrived' ] }
 ]
 var subscriptionPairs = flatten(map(subscriptions, s => map(s.topics, t => { sub: s.name, topic: t })))
 var agents = [ 'orchestration', 'exception', 'approval', 'handoff', 'integration', 'planning', 'reconciliation', 'disposition', 'reporting' ]
 var containers = [
-  { name: 'orders', ttl: -1 }
   { name: 'order_pii', ttl: piiRetentionDays * 86400 }
+  { name: 'orders', ttl: -1 }
   { name: 'exception_cases', ttl: -1 }
   { name: 'approvals', ttl: -1 }
   { name: 'handoffs', ttl: -1 }
-  { name: 'inventory_state', ttl: -1 }
   { name: 'inventory_events', ttl: -1 }
-  { name: 'dispositions', ttl: -1 }
+  { name: 'inventory_state', ttl: -1 }
+  { name: 'inventory_in_transit', ttl: -1 }
+  { name: 'reconciliation_reports', ttl: -1 }
+  { name: 'demand_plan', ttl: -1 }
+  { name: 'sales_history', ttl: -1 }
+  { name: 'cold_start', ttl: -1 }
+  { name: 'planning_meta', ttl: -1 }
+  { name: 'replenishment_recs', ttl: -1 }
+  { name: 'distribution_plans', ttl: -1 }
+  { name: 'ats_cover', ttl: -1 }
+  { name: 'baseline_flags', ttl: -1 }
+  { name: 'aging_alerts', ttl: -1 }
+  { name: 'disposition_recs', ttl: -1 }
+  { name: 'metrics_daily', ttl: -1 }
+  { name: 'summaries', ttl: -1 }
+  { name: 'shipment_facts', ttl: -1 }
 ]
 
 // ------------------------------------------------------------------ identity + observability
@@ -284,6 +308,51 @@ resource apps 'Microsoft.App/containerApps@2024-03-01' = [for a in agents: {
         ]
       } ]
       scale: { minReplicas: 1, maxReplicas: 5 }
+    }
+  }
+}]
+
+// Scheduled agent work (daily reconciliation, planning, aging, metrics; weekly and quarterly summaries). Times are UTC.
+var jobs = [
+  { name: 'reconciliation_daily', cron: '0 6 * * *' }
+  { name: 'planning_daily', cron: '0 7 * * *' }
+  { name: 'disposition_daily', cron: '30 7 * * *' }
+  { name: 'metrics_daily', cron: '0 8 * * *' }
+  { name: 'weekly_summary', cron: '0 9 * * 1' }
+  { name: 'qbr_summary', cron: '0 10 1 1,4,7,10 *' }
+]
+
+resource scheduledJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: {
+  name: '${prefix}-${replace(j.name, '_', '-')}'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
+  properties: {
+    environmentId: cae.id
+    configuration: {
+      triggerType: 'Schedule'
+      replicaTimeout: 3600
+      replicaRetryLimit: 1
+      scheduleTriggerConfig: { cronExpression: j.cron, parallelism: 1, replicaCompletionCount: 1 }
+    }
+    template: {
+      containers: [ {
+        name: 'job'
+        image: image
+        command: [ 'python', '-m', 'mcf.main', 'job', j.name ]
+        resources: { cpu: json('0.5'), memory: '1Gi' }
+        env: [
+          { name: 'MCF_CLOUD', value: 'azure' }
+          { name: 'AZURE_CLIENT_ID', value: uami.properties.clientId }
+          { name: 'MCF_SERVICEBUS_NAMESPACE', value: '${sb.name}.servicebus.windows.net' }
+          { name: 'MCF_COSMOS_URL', value: cosmos.properties.documentEndpoint }
+          { name: 'MCF_COSMOS_DB', value: 'mcf' }
+          { name: 'MCF_BLOB_URL', value: storage.properties.primaryEndpoints.blob }
+          { name: 'MCF_SQL_SERVER', value: sql.properties.fullyQualifiedDomainName }
+          { name: 'MCF_SQL_DB', value: 'mcf-audit' }
+          { name: 'MCF_KEYVAULT_URL', value: kv.properties.vaultUri }
+          { name: 'MCF_APPCONFIG_URL', value: appcfg.properties.endpoint }
+        ]
+      } ]
     }
   }
 }]
