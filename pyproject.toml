@@ -1,0 +1,24 @@
+[project]
+name = "mcf-orchestration"
+version = "0.1.0"
+description = "Agentic Fulfillment Orchestration for the Corp B x Corp A MCF pilot (cloud-agnostic core, Azure first)"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.6"]
+
+[project.optional-dependencies]
+azure = [
+  "azure-identity>=1.17",
+  "azure-servicebus>=7.12",
+  "azure-cosmos>=4.7",
+  "azure-storage-blob>=12.20",
+  "azure-keyvault-secrets>=4.8",
+  "azure-appconfiguration>=1.6",
+  "azure-communication-email>=1.0",
+  "pyodbc>=5.1",
+  "anthropic>=0.70",
+]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
