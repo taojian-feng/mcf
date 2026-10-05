@@ -1,0 +1,151 @@
+# Deploys the dev environment to Azure. Manual only: Actions > Deploy to Azure (dev) > Run workflow.
+# One-time setup: run infra/azure/bootstrap.sh in Azure Cloud Shell, then add the values it prints
+# as repository secrets and variables. See docs/DEPLOY_AZURE.md.
+name: Deploy to Azure (dev)
+
+on:
+  workflow_dispatch:
+    inputs:
+      smoke_test:
+        description: Run the reconciliation job once after deploying
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write   # GitHub OIDC token for azure/login
+  contents: read
+
+concurrency: { group: deploy-azure-dev, cancel-in-progress: false }
+
+env:
+  RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+  PREFIX: mcfpilot
+  PLACEHOLDER_IMAGE: mcr.microsoft.com/k8se/quickstart:latest
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: azure-dev   # must match the federated credential subject created by bootstrap.sh
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Check setup
+        run: |
+          [ -n "$RG" ] || { echo "::error::Repository variable AZURE_RESOURCE_GROUP is not set"; exit 1; }
+          [ -n "${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" ] && [ -n "${{ vars.SQL_ADMIN_GROUP_ID }}" ] && [ -n "${{ vars.SQL_ADMIN_GROUP_NAME }}" ] \
+            || { echo "::error::Run infra/azure/bootstrap.sh and add the variables it prints"; exit 1; }
+          az group show -n "$RG" --query location -o tsv
+
+      - name: Pick the image to keep running while infrastructure updates
+        run: |
+          current=$(az containerapp show -g "$RG" -n "$PREFIX-all" --query 'properties.template.containers[0].image' -o tsv 2>/dev/null || true)
+          echo "CURRENT_IMAGE=${current:-$PLACEHOLDER_IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Deploy infrastructure
+        run: |
+          az deployment group create -g "$RG" -n "mcf-infra-${{ github.run_number }}" \
+            -f infra/azure/main.bicep \
+            -p prefix="$PREFIX" image="$CURRENT_IMAGE" \
+               sqlAdminGroupObjectId="${{ vars.SQL_ADMIN_GROUP_ID }}" sqlAdminGroupName="${{ vars.SQL_ADMIN_GROUP_NAME }}" \
+               deployerPrincipalId="${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" \
+            --query properties.outputs -o json > outputs.json
+          out() { jq -r ".$1.value" outputs.json; }
+          {
+            echo "ACR_NAME=$(out acrName)";            echo "ACR_SERVER=$(out acrLoginServer)"
+            echo "KV_NAME=$(out keyVaultName)";        echo "APPCFG_URL=$(out appConfigUrl)"
+            echo "SQL_FQDN=$(out sqlServer)";          echo "SQL_NAME=$(out sqlServerName)"
+            echo "UAMI_NAME=$(out agentsIdentityName)"; echo "UAMI_CLIENT_ID=$(out agentsIdentityClientId)"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and push the agents image
+        run: |
+          IMAGE="$ACR_SERVER/mcf-agents:${GITHUB_SHA::12}"
+          az acr login -n "$ACR_NAME"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Seed the PII masking key (only if absent)
+        run: |
+          for i in 1 2 3 4 5 6; do   # role assignments made by the template can take a minute to apply
+            if az keyvault secret show --vault-name "$KV_NAME" -n pii-masking-key --query id -o tsv >/dev/null 2>err.txt; then
+              echo "exists"; break
+            elif grep -q SecretNotFound err.txt; then
+              az keyvault secret set --vault-name "$KV_NAME" -n pii-masking-key --value "$(openssl rand -hex 32)" --query id -o tsv >/dev/null
+              echo "created"; break
+            fi
+            cat err.txt; sleep 20
+          done
+
+      - name: Seed App Configuration defaults (only keys that are absent)
+        run: |
+          pip install --quiet pydantic
+          seed() {
+            if ! az appconfig kv show --endpoint "$APPCFG_URL" --auth-mode login --key "$1" -o none 2>/dev/null; then
+              az appconfig kv set --endpoint "$APPCFG_URL" --auth-mode login --key "$1" --value "$2" \
+                --content-type application/json --yes -o none
+              echo "seeded $1"
+            fi
+          }
+          for i in 1 2 3 4 5 6; do az appconfig kv list --endpoint "$APPCFG_URL" --auth-mode login --top 1 -o none 2>/dev/null && break; sleep 20; done
+          seed mcf:pilot_config "$(python -c 'from mcf.core.config import PilotConfig; print(PilotConfig().model_dump_json())')"
+          seed mcf:roles '{}'
+          seed mcf:contacts '{}'
+          seed mcf:pilot_authorization_list '["planning_agent", "reporting_agent"]'
+
+      - name: Create the audit ledger tables
+        run: |
+          curl -fsSL https://github.com/microsoft/go-sqlcmd/releases/download/v1.8.2/sqlcmd-linux-amd64.tar.bz2 | tar -xj -C "$RUNNER_TEMP" sqlcmd
+          export PATH="$RUNNER_TEMP:$PATH"
+          ip=$(curl -fsS https://api.ipify.org)
+          az sql server firewall-rule create -g "$RG" -s "$SQL_NAME" -n gh-runner --start-ip-address "$ip" --end-ip-address "$ip" -o none
+          trap 'az sql server firewall-rule delete -g "$RG" -s "$SQL_NAME" -n gh-runner' EXIT
+          # The serverless database may be paused; the first connection wakes it.
+          for i in 1 2 3 4 5; do
+            sqlcmd -S "$SQL_FQDN" -d mcf-audit --authentication-method ActiveDirectoryDefault -l 60 -b \
+              -v AGENTS_IDENTITY_NAME="$UAMI_NAME" -v AGENTS_CLIENT_ID="$UAMI_CLIENT_ID" \
+              -i infra/azure/sql/audit.sql && exit 0
+            sleep 30
+          done
+          exit 1
+
+      - name: Roll out the new image
+        run: |
+          az deployment group create -g "$RG" -n "mcf-app-${{ github.run_number }}" \
+            -f infra/azure/main.bicep \
+            -p prefix="$PREFIX" image="$IMAGE" \
+               sqlAdminGroupObjectId="${{ vars.SQL_ADMIN_GROUP_ID }}" sqlAdminGroupName="${{ vars.SQL_ADMIN_GROUP_NAME }}" \
+               deployerPrincipalId="${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" -o none
+
+      - name: Smoke test (run the reconciliation job once)
+        if: ${{ inputs.smoke_test }}
+        run: |
+          job="$PREFIX-reconciliation-daily"
+          run=$(az containerapp job start -g "$RG" -n "$job" --query name -o tsv)
+          echo "started $run"
+          for i in $(seq 1 60); do
+            status=$(az containerapp job execution show -g "$RG" -n "$job" --job-execution-name "$run" --query properties.status -o tsv)
+            echo "$status"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed|Stopped|Degraded) echo "::error::Job $run ended $status. Logs: az containerapp job logs show -g $RG -n $job --execution $run --container job"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Job $run did not finish in 10 minutes"; exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### MCF dev deploy"
+            echo "- Resource group: \`$RG\`"
+            echo "- Image: \`${IMAGE:-not built}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -18,3 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: az bicep install && az bicep build --file infra/azure/main.bicep --stdout > /dev/null
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t mcf-agents:ci .
+      - name: Image imports the Azure adapters
+        run: docker run --rm mcf-agents:ci python -c "import pyodbc, mcf.adapters.azure, mcf.main; print(pyodbc.drivers())"

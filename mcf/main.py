@@ -13,7 +13,8 @@ from mcf.runtime import build, from_env
 
 def main(argv: list[str]) -> None:
     ports = from_env()
-    system = build(ports, PilotConfig())  # pilot config will load from App Configuration in the next iteration
+    load = getattr(ports.directory, "pilot_config", None)
+    system = build(ports, load() if load else PilotConfig())
     if argv[:1] == ["job"]:
         system.run_job(argv[1])
         return

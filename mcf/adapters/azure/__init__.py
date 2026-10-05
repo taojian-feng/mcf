@@ -9,7 +9,8 @@ Environment variables (set by infra/azure/main.bicep outputs):
   MCF_SQL_SERVER / MCF_SQL_DB
   MCF_KEYVAULT_URL           https://<kv>.vault.azure.net/
   MCF_APPCONFIG_URL          https://<cfg>.azconfig.io
-  MCF_ACS_ENDPOINT / MCF_EMAIL_SENDER
+  MCF_ACS_ENDPOINT / MCF_EMAIL_SENDER    (optional; without them notifications are logged to stdout)
+  MCF_API_MODE               sandbox (in-process fake MCF API) | live (MCF_API_BASE_URL)
   MCF_FOUNDRY_RESOURCE / MCF_LLM_MODEL   (optional; Claude on Microsoft Foundry)
   MCF_SUBSCRIPTION           subscription name this process consumes as (one per agent)
 """
@@ -250,6 +251,11 @@ class AppConfigDirectory:
     def contact(self, name: str) -> str | None:
         return self._json("mcf:contacts", {}).get(name)
 
+    def pilot_config(self):
+        """PilotConfig from key mcf:pilot_config (JSON); defaults for anything not set."""
+        from mcf.core.config import PilotConfig
+        return PilotConfig.model_validate(self._json("mcf:pilot_config", {}))
+
 
 # ---------------------------------------------------------------- Communication Services (Notifier)
 
@@ -266,6 +272,14 @@ class AcsEmailNotifier:
             "recipients": {"to": [{"address": address}]},
             "content": {"subject": f"[MCF {severity}] {subject}", "plainText": body},
         })
+
+
+class LogNotifier:
+    """Dev fallback: notifications go to stdout, which Container Apps ships to Log Analytics."""
+
+    def send(self, recipient: str, subject: str, body: str, *, severity: str = "info") -> None:
+        print(json.dumps({"notification": {"to": recipient, "subject": subject, "severity": severity, "body": body}}),
+              flush=True)
 
 
 # ---------------------------------------------------------------- Claude on Microsoft Foundry (LLM)
@@ -297,6 +311,7 @@ class FoundryClaude:
 
 def azure_ports():
     from mcf.adapters.http_mcf import HttpMCFTransport
+    from mcf.adapters.memory import FakeMCF
     from mcf.runtime import Ports
 
     env = os.environ
@@ -314,8 +329,9 @@ def azure_ports():
         blobs=AzureBlobStore(env["MCF_BLOB_URL"], cred),
         ledger=SqlLedger(env["MCF_SQL_SERVER"], env["MCF_SQL_DB"], cred),
         directory=directory,
-        notifier=AcsEmailNotifier(env["MCF_ACS_ENDPOINT"], env["MCF_EMAIL_SENDER"], directory, cred),
-        mcf=HttpMCFTransport(env["MCF_API_BASE_URL"], secrets),
+        notifier=(AcsEmailNotifier(env["MCF_ACS_ENDPOINT"], env["MCF_EMAIL_SENDER"], directory, cred)
+                  if env.get("MCF_ACS_ENDPOINT") else LogNotifier()),
+        mcf=(HttpMCFTransport(env["MCF_API_BASE_URL"], secrets) if env.get("MCF_API_MODE") == "live" else FakeMCF()),
         llm=llm,
         masking_key=secrets.get_secret("pii-masking-key").encode(),
     )
