@@ -17,15 +17,15 @@ in-process sandbox MCF API until a real one exists, and logs notifications to st
 
 | Service | Sizing | Per month |
 |---|---|---|
-| Container Apps | 1 app at 0.5 vCPU / 1 GiB always on, 6 short daily jobs | ~$40 |
+| Container Apps | agents app (0.5 vCPU), partner gateway and two partner simulators (0.25 vCPU each), all always on; 6 short daily jobs | ~$100 |
 | App Configuration | Standard | ~$36 |
 | Service Bus | Standard | ~$10 |
-| Azure SQL (audit ledger) | Serverless, auto-pauses after an hour idle | ~$5–15 |
-| Cosmos DB (2 accounts) | Serverless | ~$1–5 at dev volume |
-| Container Registry, Key Vault, Storage, Log Analytics | Basic tiers | ~$10 |
-| **Total** | | **about $100** |
+| Azure SQL (audit ledger) | Standard S0 (partner traffic keeps it busy, so serverless would never pause) | ~$15 |
+| Cosmos DB (2 accounts) | Serverless | ~$5–15 with simulated traffic |
+| Container Registry, Key Vault, Storage, Log Analytics | Basic tiers | ~$15 |
+| **Total** | | **about $180** |
 
-For production, set `serviceBusSku=Premium` (about $700) and split `agentApps` to one app per agent.
+Without the partner simulators (`enablePartners=false`) it is about $100. For production, set `serviceBusSku=Premium` (about $700) and split `agentApps` to one app per agent.
 
 ## 3. Providers and quotas
 
@@ -123,13 +123,34 @@ for the pilot, connect your own domain in the portal (Email Communication Servic
 Portal > the `mcfpilot-all` Container App > Log stream, or Log Analytics with
 `ContainerAppConsoleLogs_CL | order by TimeGenerated desc`.
 
+### Partners: Corp A and Corp B
+
+The deploy runs both partner companies as simulators, each in its own Container App with its own identity and
+database, talking to the system only over HTTPS (contract and behaviour: [PARTNER_APIS.md](PARTNER_APIS.md)):
+
+- **Corp B** (`mcfpilot-corpb-oms`) sends its item catalog and planning files at go-live, starts ordering about
+  15 minutes later (about 140 orders a day, `corpbOrdersPerDay`), sends a forecast an hour in, and new forecast
+  and sales files every Monday.
+- **Corp A** (`mcfpilot-corpa-mcf`) is the MCF API. Once the catalog is listed with it, it receives opening
+  stock, then accepts, packs, ships and delivers orders on realistic timings, with the occasional late,
+  lost or undeliverable parcel, nightly stock counts, and an ops team that works the system's handoffs.
+- **The partner gateway** (`mcfpilot-gateway`) is how both get in: Corp B with an API key, Corp A with signed
+  webhooks.
+
+The shared credentials are created once in Key Vault by the deploy. What you will notice is email: daily
+reconciliation, exceptions that need a person, handoff escalations and approvals.
+
+To pause the partners, scale both simulators to zero (portal > Container App > Scale, or
+`az containerapp update -g mcfpilot-dev-rg -n mcfpilot-corpb-oms --min-replicas 0 --max-replicas 0`, then the same
+for `mcfpilot-corpa-mcf`). To remove them, deploy with `enablePartners=false`. To connect a real Corp A later, point
+`MCF_API_BASE_URL` at it and put its OAuth client in `mcf-client-id` / `mcf-client-secret`.
+
 ### Still off
 
 - **Claude.** The agents run on deterministic rules without it. Turning it on needs Claude deployed in
   Microsoft Foundry on this subscription; put its key in Key Vault as `foundry-api-key` and set
   `MCF_FOUNDRY_RESOURCE` on the app.
-- **Real MCF API.** The agents talk to a built-in sandbox until Corp A provides an endpoint. Then set the
-  `mcfApiMode` parameter to `live`, `MCF_API_BASE_URL`, and the Key Vault secret `mcf-access-token`.
+- **Approving in a browser.** Approval requests arrive by email, but there is no page to approve them on yet.
 
 ## 8. Tear down
 

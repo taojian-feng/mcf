@@ -15,6 +15,7 @@ from mcf.agents.reporting import ReportingAgent
 from mcf.core.config import PilotConfig
 from mcf.core.ports import (
     LLM, AuditLedger, BlobStore, Clock, Directory, DocumentStore, MCFTransport, MessageBus, Notifier,
+    SecretStore,
 )
 from mcf.services.approval import ApprovalService
 from mcf.services.audit import AuditService
@@ -35,6 +36,7 @@ class Ports:
     mcf: MCFTransport
     llm: LLM | None
     masking_key: bytes
+    secrets: SecretStore | None = None
 
 
 @dataclass

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       smoke_test:
-        description: Run the reconciliation job once after deploying
+        description: Check the partner endpoints and run the reconciliation job once after deploying
         type: boolean
         default: true
       sql_location:
@@ -46,62 +46,89 @@ jobs:
             || { echo "::error::Run infra/azure/bootstrap.sh and add the variables it prints"; exit 1; }
           az group show -n "$RG" --query location -o tsv
 
-      - name: Pick the image to keep running while infrastructure updates
+      - name: Pick the audit database region
         run: |
-          current=$(az containerapp show -g "$RG" -n "$PREFIX-all" --query 'properties.template.containers[0].image' -o tsv 2>/dev/null || true)
-          echo "CURRENT_IMAGE=${current:-$PLACEHOLDER_IMAGE}" >> "$GITHUB_ENV"
           # Keep the audit database where it already is; otherwise try regions in order.
           existing=$(az sql server list -g "$RG" --query "[?state=='Ready'] | [0].location" -o tsv 2>/dev/null || true)
           rg_location=$(az group show -n "$RG" --query location -o tsv)
           echo "SQL_REGIONS=${existing:-${{ inputs.sql_location }}} $rg_location centralus westus3 northcentralus southcentralus" >> "$GITHUB_ENV"
-
-      - name: Deploy infrastructure
-        run: |
-          deploy() {
-            az deployment group create -g "$RG" -n "mcf-infra-${{ github.run_number }}-$1" \
-              -f infra/azure/main.bicep \
-              -p prefix="$PREFIX" image="$CURRENT_IMAGE" sqlLocation="$1" \
-                 sqlAdminGroupObjectId="${{ vars.SQL_ADMIN_GROUP_ID }}" sqlAdminGroupName="${{ vars.SQL_ADMIN_GROUP_NAME }}" \
-                 deployerPrincipalId="${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" \
-              --query properties.outputs -o json > outputs.json 2> deploy-err.txt
-          }
-          ok=
+          cat > "$RUNNER_TEMP/deploy.sh" <<'SH'
+          # deploy.sh <name> <agents image> <simulators image>: deploy main.bicep, trying SQL regions in order.
+          set -u
           for region in $SQL_REGIONS; do
-            echo "Deploying with the audit database in $region"
-            if deploy "$region"; then ok=1; break; fi
+            echo "Deploying ($1) with the audit database in $region"
+            if az deployment group create -g "$RG" -n "mcf-$1-$GITHUB_RUN_NUMBER" -f infra/azure/main.bicep \
+                 -p prefix="$PREFIX" image="$2" simImage="$3" sqlLocation="$region" \
+                    sqlAdminGroupObjectId="$SQL_ADMIN_GROUP_ID" sqlAdminGroupName="$SQL_ADMIN_GROUP_NAME" \
+                    deployerPrincipalId="$DEPLOYER_ID" \
+                 --query properties.outputs -o json > outputs.json 2> deploy-err.txt; then
+              exit 0
+            fi
             cat deploy-err.txt
             grep -q RegionDoesNotAllowProvisioning deploy-err.txt || exit 1
             echo "::warning::$region is not accepting new Azure SQL servers; trying the next region"
           done
-          [ -n "$ok" ] || { echo "::error::No region in '$SQL_REGIONS' accepted a new Azure SQL server"; exit 1; }
+          echo "::error::No region in '$SQL_REGIONS' accepted a new Azure SQL server"; exit 1
+          SH
+
+      - name: First deploy only - create the infrastructure with placeholder images
+        env: { SQL_ADMIN_GROUP_ID: "${{ vars.SQL_ADMIN_GROUP_ID }}", SQL_ADMIN_GROUP_NAME: "${{ vars.SQL_ADMIN_GROUP_NAME }}", DEPLOYER_ID: "${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" }
+        run: |
+          acr=$(az acr list -g "$RG" --query "[?starts_with(name, '${PREFIX}acr')] | [0].name" -o tsv)
+          if [ -z "$acr" ]; then
+            bash "$RUNNER_TEMP/deploy.sh" bootstrap "$PLACEHOLDER_IMAGE" "$PLACEHOLDER_IMAGE"
+            acr=$(jq -r .acrName.value outputs.json)
+          fi
+          echo "ACR_NAME=$acr" >> "$GITHUB_ENV"
+          echo "ACR_SERVER=$(az acr show -n "$acr" --query loginServer -o tsv)" >> "$GITHUB_ENV"
+          echo "KV_NAME=$(az keyvault list -g "$RG" --query "[?starts_with(name, '${PREFIX}-kv')] | [0].name" -o tsv)" >> "$GITHUB_ENV"
+
+      - name: Build and push the agents and partner simulator images
+        run: |
+          tag="${GITHUB_SHA::12}"
+          az acr login -n "$ACR_NAME"
+          docker build -t "$ACR_SERVER/mcf-agents:$tag" .
+          docker build -f sim/Dockerfile -t "$ACR_SERVER/partner-sims:$tag" .
+          docker push "$ACR_SERVER/mcf-agents:$tag"
+          docker push "$ACR_SERVER/partner-sims:$tag"
+          echo "IMAGE=$ACR_SERVER/mcf-agents:$tag" >> "$GITHUB_ENV"
+          echo "SIM_IMAGE=$ACR_SERVER/partner-sims:$tag" >> "$GITHUB_ENV"
+
+      - name: Seed keys and partner credentials (only those absent)
+        run: |
+          # pii-masking-key: PII field masking. The rest are what the partners and the system share:
+          # Corp A's OAuth client for the MCF API, Corp A's webhook signing secret, and an API key each way with Corp B.
+          seed() {
+            for i in 1 2 3 4 5 6; do   # role assignments made by the template can take a minute to apply
+              if az keyvault secret show --vault-name "$KV_NAME" -n "$1" --query id -o tsv >/dev/null 2>err.txt; then
+                echo "$1: exists"; return
+              elif grep -q SecretNotFound err.txt; then
+                az keyvault secret set --vault-name "$KV_NAME" -n "$1" --value "$2" --query id -o tsv >/dev/null
+                echo "$1: created"; return
+              fi
+              cat err.txt; sleep 20
+            done
+            exit 1
+          }
+          seed pii-masking-key "$(openssl rand -hex 32)"
+          seed mcf-client-id "corpb-mcf-pilot"
+          seed mcf-client-secret "$(openssl rand -hex 32)"
+          seed partner-corpa-webhook-secret "$(openssl rand -hex 32)"
+          seed partner-corpb-api-key "$(openssl rand -hex 24)"
+          seed corpb-inbound-api-key "$(openssl rand -hex 24)"
+
+      - name: Deploy infrastructure and the new images
+        env: { SQL_ADMIN_GROUP_ID: "${{ vars.SQL_ADMIN_GROUP_ID }}", SQL_ADMIN_GROUP_NAME: "${{ vars.SQL_ADMIN_GROUP_NAME }}", DEPLOYER_ID: "${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" }
+        run: |
+          bash "$RUNNER_TEMP/deploy.sh" infra "$IMAGE" "$SIM_IMAGE"
           out() { jq -r ".$1.value" outputs.json; }
           {
-            echo "ACR_NAME=$(out acrName)";            echo "ACR_SERVER=$(out acrLoginServer)"
-            echo "KV_NAME=$(out keyVaultName)";        echo "APPCFG_URL=$(out appConfigUrl)"
+            echo "APPCFG_URL=$(out appConfigUrl)"
             echo "SQL_FQDN=$(out sqlServer)";          echo "SQL_NAME=$(out sqlServerName)"
             echo "SQL_LOCATION=$(out sqlLocation)"
             echo "UAMI_NAME=$(out agentsIdentityName)"; echo "UAMI_CLIENT_ID=$(out agentsIdentityClientId)"
+            echo "GATEWAY_URL=$(out gatewayUrl)";      echo "CORPA_URL=$(out corpaUrl)"; echo "CORPB_URL=$(out corpbUrl)"
           } >> "$GITHUB_ENV"
-
-      - name: Build and push the agents image
-        run: |
-          IMAGE="$ACR_SERVER/mcf-agents:${GITHUB_SHA::12}"
-          az acr login -n "$ACR_NAME"
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-
-      - name: Seed the PII masking key (only if absent)
-        run: |
-          for i in 1 2 3 4 5 6; do   # role assignments made by the template can take a minute to apply
-            if az keyvault secret show --vault-name "$KV_NAME" -n pii-masking-key --query id -o tsv >/dev/null 2>err.txt; then
-              echo "exists"; break
-            elif grep -q SecretNotFound err.txt; then
-              az keyvault secret set --vault-name "$KV_NAME" -n pii-masking-key --value "$(openssl rand -hex 32)" --query id -o tsv >/dev/null
-              echo "created"; break
-            fi
-            cat err.txt; sleep 20
-          done
 
       - name: Seed pilot settings and sync people from config/pilot.yaml
         env:
@@ -141,17 +168,14 @@ jobs:
           done
           exit 1
 
-      - name: Roll out the new image
-        run: |
-          az deployment group create -g "$RG" -n "mcf-app-${{ github.run_number }}" \
-            -f infra/azure/main.bicep \
-            -p prefix="$PREFIX" image="$IMAGE" sqlLocation="$SQL_LOCATION" \
-               sqlAdminGroupObjectId="${{ vars.SQL_ADMIN_GROUP_ID }}" sqlAdminGroupName="${{ vars.SQL_ADMIN_GROUP_NAME }}" \
-               deployerPrincipalId="${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" -o none
-
-      - name: Smoke test (run the reconciliation job once)
+      - name: Smoke test (partners answer, reconciliation job runs)
         if: ${{ inputs.smoke_test }}
         run: |
+          for url in "$GATEWAY_URL" "$CORPA_URL" "$CORPB_URL"; do
+            [ -n "$url" ] || continue
+            for i in $(seq 1 30); do curl -fsS "$url/healthz" && echo && break; sleep 10; done
+            curl -fsS "$url/healthz" >/dev/null || { echo "::error::$url/healthz is not answering"; exit 1; }
+          done
           job="$PREFIX-reconciliation-daily"
           run=$(az containerapp job start -g "$RG" -n "$job" --query name -o tsv)
           echo "started $run"
@@ -172,5 +196,6 @@ jobs:
           {
             echo "### MCF dev deploy"
             echo "- Resource group: \`$RG\`"
-            echo "- Image: \`${IMAGE:-not built}\`"
+            echo "- Images: \`${IMAGE:-not built}\`, \`${SIM_IMAGE:-not built}\`"
+            if [ -n "${GATEWAY_URL:-}" ]; then echo "- Partner gateway: $GATEWAY_URL (Corp A MCF API: $CORPA_URL, Corp B OMS: $CORPB_URL)"; fi
           } >> "$GITHUB_STEP_SUMMARY"
