@@ -35,8 +35,12 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_refs_lookup' AND objec
 GO
 -- Agents' managed identity: INSERT and SELECT only. Created by client id (SID) so the deploying
 -- principal does not need Directory Readers in Entra ID.
+-- CREATE USER ... WITH SID only takes a binary literal, so the SID is formatted first and the statement run dynamically.
 IF DATABASE_PRINCIPAL_ID('$(AGENTS_IDENTITY_NAME)') IS NULL
-    CREATE USER [$(AGENTS_IDENTITY_NAME)]
-        WITH SID = CAST(CAST('$(AGENTS_CLIENT_ID)' AS UNIQUEIDENTIFIER) AS VARBINARY(16)), TYPE = E;
+BEGIN
+    DECLARE @sid NVARCHAR(64) = CONVERT(NVARCHAR(64), CAST(CAST('$(AGENTS_CLIENT_ID)' AS UNIQUEIDENTIFIER) AS VARBINARY(16)), 1);
+    EXEC(N'CREATE USER [$(AGENTS_IDENTITY_NAME)] WITH SID = ' + @sid + N', TYPE = E');
+END
+GO
 GRANT INSERT, SELECT ON SCHEMA::audit TO [$(AGENTS_IDENTITY_NAME)];
 GO
