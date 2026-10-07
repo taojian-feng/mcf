@@ -170,6 +170,20 @@ once by hand, because Azure asks a person to accept the Marketplace terms:
    Standard. Accept the terms when asked.
 3. That is all. Until the model exists, calls fail and every agent falls back to its rules, as before.
 
+If Foundry says **"Insufficient quota"**, your subscription has no Claude quota yet. Microsoft raises it through a
+review form ([aka.ms/oai/stuquotarequest](https://aka.ms/oai/stuquotarequest)), which can take a while. In the
+meantime use the same model straight from Anthropic:
+
+1. Create an API key at [console.anthropic.com](https://console.anthropic.com) (Settings > API keys) and add a
+   payment method or credits there.
+2. Save it in Key Vault (Cloud Shell; the vault name is in the deploy summary or the resource group):
+   `az keyvault secret set --vault-name <mcfpilot-kv-...> -n anthropic-api-key --value <the key>`
+3. Restart the agents so they pick it up: `az containerapp revision restart -g mcfpilot-dev-rg -n mcfpilot-all
+   --revision $(az containerapp show -g mcfpilot-dev-rg -n mcfpilot-all --query properties.latestRevisionName -o tsv)`.
+   Jobs, including the evaluation, read it on their next run.
+
+When `anthropic-api-key` is present it is used; delete the secret to go back to Foundry once quota arrives.
+
 To check how Claude does before relying on it, start the evaluation job:
 
 ```bash
