@@ -36,8 +36,11 @@ For production, set `serviceBusSku=Premium` (about $700) and split `agentApps` t
 Default quotas on a pay-as-you-go subscription cover this deployment. The ones that most often get in the way:
 
 - **Region capacity for Azure SQL or Cosmos DB.** New subscriptions are sometimes refused in busy regions with
-  "region is not accepting new customers" or "subscription is not allowed to create in this region". Re-run the
-  bootstrap with another region, for example `LOCATION=centralus`, and delete the old resource group.
+  "region is not accepting new customers" or "Location ... is not accepting creation of new ... SQL Database
+  servers". For SQL the workflow handles this itself: it tries the resource group's region, then `centralus`,
+  `westus3`, `northcentralus` and `southcentralus`, and keeps the audit database wherever it lands. You can also
+  pick a region in the workflow's `sql_location` box. For Cosmos DB, re-run the bootstrap with another region,
+  for example `LOCATION=centralus RG=mcfpilot-dev2-rg`.
 - **Container Apps.** Uses about 0.5 vCPU of the default 100-core-per-environment allowance.
 
 ## 4. Choose how deployments run

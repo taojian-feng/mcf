@@ -25,6 +25,9 @@ param sqlAdminGroupName string
 @description('Days consumer PII is kept before Cosmos TTL deletes it (R9.5)')
 param piiRetentionDays int = 90
 
+@description('Region for the audit database. Busy regions sometimes refuse new Azure SQL servers; the rest of the stack stays in location.')
+param sqlLocation string = location
+
 var suffix = uniqueString(resourceGroup().id)
 var topics = [
   'orders.received'
@@ -233,8 +236,8 @@ resource appcfg 'Microsoft.AppConfiguration/configurationStores@2023-03-01' = {
 // ------------------------------------------------------------------ Azure SQL (append-only audit ledger)
 
 resource sql 'Microsoft.Sql/servers@2023-08-01-preview' = {
-  name: '${prefix}-sql-${suffix}'
-  location: location
+  name: sqlLocation == location ? '${prefix}-sql-${suffix}' : '${prefix}-sql-${uniqueString(resourceGroup().id, sqlLocation)}'
+  location: sqlLocation
   properties: {
     minimalTlsVersion: '1.2'
     administrators: {
@@ -251,7 +254,7 @@ resource sql 'Microsoft.Sql/servers@2023-08-01-preview' = {
 resource sqlDb 'Microsoft.Sql/servers/databases@2023-08-01-preview' = {
   parent: sql
   name: 'mcf-audit'
-  location: location
+  location: sqlLocation
   sku: { name: 'GP_S_Gen5_2', tier: 'GeneralPurpose' }
   properties: { isLedgerOn: true, autoPauseDelay: 60, minCapacity: json('0.5') } // every table is a ledger table; DDL in sql/audit.sql makes them append-only
 }
@@ -457,5 +460,6 @@ output keyVaultName string = kv.name
 output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
 output sqlServerName string = sql.name
+output sqlLocation string = sqlLocation
 output agentsIdentityName string = uami.name
 output containerAppNames array = [for a in agentApps: '${prefix}-${a}']
