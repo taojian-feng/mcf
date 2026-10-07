@@ -6,11 +6,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mcf.adapters.memory import StaticDirectory  # noqa: E402
-from mcf.core import topics  # noqa: E402
-from mcf.core.config import PilotConfig  # noqa: E402
-from mcf.core.ports import Event  # noqa: E402
-from mcf.runtime import build, memory_ports  # noqa: E402
+from tower.adapters.memory import StaticDirectory  # noqa: E402
+from tower.core import topics  # noqa: E402
+from tower.core.config import PilotConfig  # noqa: E402
+from tower.core.ports import Event  # noqa: E402
+from tower.runtime import build, memory_ports  # noqa: E402
 
 PILOT_UPCS = {"190000000001", "190000000002"}
 
@@ -44,7 +44,7 @@ def system(directory):
 
 
 def order_payload(order_id="ord-1", *, upc="190000000001", state="WA", promise=2, placed_at=None):
-    from mcf.adapters.memory import VirtualClock
+    from tower.adapters.memory import VirtualClock
     placed_at = placed_at or VirtualClock().now()
     return {
         "order_id": order_id, "placed_at": placed_at.isoformat(), "delivery_promise_days": promise,

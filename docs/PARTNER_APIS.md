@@ -1,6 +1,6 @@
-# Partner APIs: how Corp A, Corp B and the MCF system talk
+# Partner APIs: how Corp A, Corp B and the Control Tower talk
 
-The MCF system sits between two companies. In the dev environment both companies are simulated, but
+The Control Tower sits between two companies. In the dev environment both companies are simulated, but
 each runs as its own service with its own identity and its own database, and talks to the system
 only over HTTPS, exactly as a real partner would. Swapping a simulator for the real partner means
 pointing a URL somewhere else and exchanging real credentials; no agent code changes.
@@ -11,7 +11,7 @@ flowchart LR
     OMS[Order management]
     FILES[Planning files]
   end
-  subgraph MCF[MCF system - ours]
+  subgraph CT[Control Tower - ours]
     GW[Partner gateway]
     BUS[(Service Bus)]
     AG[Agents]
@@ -38,15 +38,15 @@ flowchart LR
 
 | Secret | Who presents it | To whom |
 |---|---|---|
-| `mcf-client-id`, `mcf-client-secret` | MCF system | Corp A OAuth2 token endpoint |
-| `partner-corpa-webhook-secret` | Corp A signs webhooks | MCF gateway verifies |
-| `partner-corpb-api-key` | Corp B order management | MCF gateway (`X-Api-Key`) |
-| `corpb-inbound-api-key` | MCF connectors | Corp B endpoints (`X-Api-Key`) |
+| `mcf-client-id`, `mcf-client-secret` | Control Tower | Corp A OAuth2 token endpoint |
+| `partner-corpa-webhook-secret` | Corp A signs webhooks | tower gateway verifies |
+| `partner-corpb-api-key` | Corp B order management | tower gateway (`X-Api-Key`) |
+| `corpb-inbound-api-key` | tower connectors | Corp B endpoints (`X-Api-Key`) |
 
 To rotate one, set a new value in Key Vault; the system picks it up within five minutes and the
 simulators on their next restart.
 
-## Corp B to the MCF system
+## Corp B to the Control Tower
 
 `POST {gateway}/v1/orders` with `X-Api-Key`. Body is a consumer order:
 
@@ -73,14 +73,14 @@ rejected back to Corp B with reasons.
 
 Invalid records are quarantined and Corp B's data contact gets the list; valid ones are used.
 
-## MCF system to Corp B
+## Control Tower to Corp B
 
 `POST {corpb}/oms/v1/events` (order management) and `POST {corpb}/corpb/v1/events` (other teams),
 with `X-Api-Key`. Body: `{"event_id", "type", "payload", "occurred_at"}`. Types include
 `order_rejected`, `tracking_update`, `delay`, `delivery_failed`, `reship`, `cancellation` and
 `decant_counts`. Corp B answers `2xx`; anything else is retried, then dead-lettered.
 
-## MCF system to Corp A (the MCF API)
+## Control Tower to Corp A (the MCF API)
 
 `POST {corpa}/oauth2/token` with `grant_type=client_credentials`, `client_id`, `client_secret`
 returns a bearer token valid for an hour. Then:
@@ -102,7 +102,7 @@ Errors are `{"errors": [{"code", "message"}]}`. Like any partner API it throttle
 moments (503) and is occasionally slow; the integration layer retries those 1, 2, 4, 8, 16 seconds
 apart and fails fast on 4xx.
 
-## Corp A to the MCF system (webhooks)
+## Corp A to the Control Tower (webhooks)
 
 `POST {gateway}/v1/mcf/notifications` with header
 `X-MCF-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>">`. Signatures older

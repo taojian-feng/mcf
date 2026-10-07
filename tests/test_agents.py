@@ -4,11 +4,11 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from conftest import advance, inv
-from mcf.agents.planning import week_of
-from mcf.core import topics
-from mcf.core.models import ApprovalCategory, AuditKind, OwningParty
-from mcf.core.ports import Event
-from mcf.services.governance import AccessDenied
+from tower.agents.planning import week_of
+from tower.core import topics
+from tower.core.models import ApprovalCategory, AuditKind, OwningParty
+from tower.core.ports import Event
+from tower.services.governance import AccessDenied
 
 UPC = "190000000001"
 UPC2 = "190000000002"

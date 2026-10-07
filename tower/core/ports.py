@@ -1,6 +1,6 @@
 """Ports: the only interfaces agents and services may depend on.
 
-Each cloud provides adapters for these (mcf/adapters/<cloud>). Keep this file free of
+Each cloud provides adapters for these (tower/adapters/<cloud>). Keep this file free of
 cloud SDK imports so the core runs unchanged on Azure, GCP and AWS.
 """
 from __future__ import annotations

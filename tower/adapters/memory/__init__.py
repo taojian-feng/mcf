@@ -10,8 +10,8 @@ from typing import Any, Callable
 
 from pydantic import BaseModel
 
-from mcf.core.models import AuditRecord
-from mcf.core.ports import Event, Handler, MCFError
+from tower.core.models import AuditRecord
+from tower.core.ports import Event, Handler, MCFError
 
 
 class VirtualClock:

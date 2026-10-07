@@ -438,7 +438,7 @@ resource scheduledJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: {
       containers: [ {
         name: 'job'
         image: image
-        command: [ 'python', '-m', 'mcf.main', 'job', j.name ]
+        command: [ 'python', '-m', 'tower.main', 'job', j.name ]
         resources: { cpu: json('0.5'), memory: '1Gi' }
         env: commonEnv
       } ]
@@ -468,7 +468,7 @@ resource gatewayApp 'Microsoft.App/containerApps@2024-03-01' = if (enablePartner
       containers: [ {
         name: 'gateway'
         image: image
-        command: agentsPlaceholder ? null : [ 'python', '-m', 'mcf.edge.gateway' ]
+        command: agentsPlaceholder ? null : [ 'python', '-m', 'tower.edge.gateway' ]
         resources: { cpu: json('0.25'), memory: '0.5Gi' }
         env: concat(baseEnv, [ { name: 'PORT', value: '8080' } ])
       } ]

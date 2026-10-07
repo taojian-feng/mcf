@@ -28,10 +28,10 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from mcf.core.models import AuditRecord
-from mcf.core.ports import Event, Handler
+from tower.core.models import AuditRecord
+from tower.core.ports import Event, Handler
 
-log = logging.getLogger("mcf.azure")
+log = logging.getLogger("tower.azure")
 
 
 def _credential():
@@ -283,7 +283,7 @@ class AppConfigDirectory:
 
     def pilot_config(self):
         """PilotConfig from key mcf:pilot_config (JSON); defaults for anything not set."""
-        from mcf.core.config import PilotConfig
+        from tower.core.config import PilotConfig
         return PilotConfig.model_validate(self._json("mcf:pilot_config", {}))
 
 
@@ -307,7 +307,7 @@ class AcsEmailNotifier:
             self._client.begin_send({
                 "senderAddress": self._sender,
                 "recipients": {"to": [{"address": address}]},
-                "content": {"subject": f"[MCF {severity}] {subject}", "plainText": body},
+                "content": {"subject": f"[Control Tower {severity}] {subject}", "plainText": body},
             })
         except Exception as e:  # noqa: BLE001 - delivery problems are logged, not raised
             self._log.send(address, subject, body, severity=severity, note=f"email failed: {e}")
@@ -351,9 +351,9 @@ class FoundryClaude:
 # ---------------------------------------------------------------- composition
 
 def azure_ports():
-    from mcf.adapters.http_mcf import HttpMCFTransport
-    from mcf.adapters.memory import FakeMCF
-    from mcf.runtime import Ports
+    from tower.adapters.http_mcf import HttpMCFTransport
+    from tower.adapters.memory import FakeMCF
+    from tower.runtime import Ports
 
     env = os.environ
     cred = _credential()

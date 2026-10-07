@@ -8,7 +8,7 @@ Requests are authenticated, validated and turned into events on the bus; the age
 Each event's id comes from the partner's own id (order id, notification id, inventory event id),
 so the bus's duplicate detection absorbs partner retries.
 
-Run on Azure with `python -m mcf.edge.gateway` (port $PORT, default 8080).
+Run on Azure with `python -m tower.edge.gateway` (port $PORT, default 8080).
 """
 from __future__ import annotations
 
@@ -27,11 +27,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from mcf.core import topics
-from mcf.core.models import ConsumerOrder, UnhappyPathSignal
-from mcf.core.ports import Clock, Event, MessageBus
+from tower.core import topics
+from tower.core.models import ConsumerOrder, UnhappyPathSignal
+from tower.core.ports import Clock, Event, MessageBus
 
-log = logging.getLogger("mcf.gateway")
+log = logging.getLogger("tower.gateway")
 
 CORPB_KEY = "partner-corpb-api-key"
 CORPA_WEBHOOK_SECRET = "partner-corpa-webhook-secret"
@@ -197,7 +197,7 @@ def main() -> None:
 
     import uvicorn
 
-    from mcf.adapters.azure import KeyVaultSecrets, ServiceBusBus, SystemClock, _credential
+    from tower.adapters.azure import KeyVaultSecrets, ServiceBusBus, SystemClock, _credential
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cred = _credential()

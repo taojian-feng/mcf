@@ -13,10 +13,10 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
-COPY mcf ./mcf
+COPY tower ./tower
 RUN pip install --no-cache-dir ".[azure]"
 
-RUN useradd --uid 10001 --no-create-home mcf
-USER mcf
+RUN useradd --uid 10001 --no-create-home tower
+USER tower
 ENV PYTHONUNBUFFERED=1
-CMD ["python", "-m", "mcf.main"]
+CMD ["python", "-m", "tower.main"]

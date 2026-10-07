@@ -1,10 +1,12 @@
-# MCF Agentic Fulfillment Orchestration: Architecture (Azure first, multi-cloud ready)
+# Logistics Control Tower: Architecture (Azure first, multi-cloud ready)
 
 Status: draft v0.2 (2026-10-05). Source: `# Requirements Document Agentic Fulfillment Orchestration system.md` (R1 to R11).
 
+Naming: the system is the **Logistics Control Tower** (Python package `tower`). "MCF" now means only Corp A's Multi-Channel Fulfillment API that the tower calls. Deployed names keep their old spelling on purpose, so nothing is rebuilt: Azure resources `mcfpilot-*`, the `MCF_*` environment variables, the Cosmos database `mcf`, the SQL database `mcf-audit`, App Configuration keys `mcf:*`, and the `mcf-agents` image.
+
 ## 1. Design principles
 
-1. **Cloud-agnostic core, cloud-specific adapters.** All agent and service logic lives in `mcf/core`, `mcf/services` and `mcf/agents` and depends only on *ports* (Python protocols) in `mcf/core/ports.py`. Azure is the first set of adapters (`mcf/adapters/azure`). GCP and AWS become sibling packages (`mcf/adapters/gcp`, `mcf/adapters/aws`) with no change to agent code. An in-memory adapter set (`mcf/adapters/memory`) runs the whole system locally and in tests.
+1. **Cloud-agnostic core, cloud-specific adapters.** All agent and service logic lives in `tower/core`, `tower/services` and `tower/agents` and depends only on *ports* (Python protocols) in `tower/core/ports.py`. Azure is the first set of adapters (`tower/adapters/azure`). GCP and AWS become sibling packages (`tower/adapters/gcp`, `tower/adapters/aws`) with no change to agent code. An in-memory adapter set (`tower/adapters/memory`) runs the whole system locally and in tests.
 2. **Event-driven agents.** Agents never call each other directly. They publish and subscribe to typed events on a message bus (topics below). That gives the R3.6 / R5.5 / R4.8 handoffs durability, retries and replay for free.
 3. **Deterministic first, LLM where judgement helps.** SLA timers, thresholds, state machines, retries and approvals are deterministic code, because the requirements are timing and correctness contracts. The LLM is used for exception classification with confidence (R3.1, R3.4), decision rationale text (R8.1, R10.1), anomaly narratives and review summaries (R6.3, R6.5). The LLM is itself a port, so a rule-based fallback always exists.
 4. **Every decision is audited.** Agents write to the Audit_Service through one helper; a failed write is preserved for replay and alerts the operations team (R10.6).

@@ -8,5 +8,5 @@ with their own identity and their own data, talking to the MCF system only over 
   sim.corpb  Corp B: the order management system that sends consumer orders, receives order
              updates, and drops weekly forecast and sales files into the landing storage.
 
-Nothing in mcf/ imports this package; the contract between them is docs/PARTNER_APIS.md.
+Nothing in tower/ imports this package; the contract between them is docs/PARTNER_APIS.md.
 """

@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
-from mcf.core.models import AuditKind, AuditRecord, OwningParty
-from mcf.core.ports import AuditLedger, BlobStore, Clock, Notifier
+from tower.core.models import AuditKind, AuditRecord, OwningParty
+from tower.core.ports import AuditLedger, BlobStore, Clock, Notifier
 
 OPS_TEAM = "ops-team"
 
