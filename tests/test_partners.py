@@ -4,95 +4,26 @@ Corp B places orders and drops feed files -> our gateway -> agents -> Corp A's M
 Corp A's warehouse and carriers -> signed webhooks -> our gateway -> agents -> Corp B.
 """
 import json
-import random
-from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 
 import pytest
 from starlette.testclient import TestClient
 
-from tower.adapters.http_mcf import HttpMCFTransport
-from tower.adapters.memory import StaticDirectory, VirtualClock
-from tower.core import topics
-from tower.core.config import PilotConfig
-from tower.core.ports import Event
-from tower.edge.connectors import PartnerConnectors
-from tower.edge.gateway import Gateway, create_app as gateway_app
-from tower.runtime import build, memory_ports
+from evals.world import SECRETS, _client_sender, build_world
 from sim import catalog
-from sim.common.store import MemoryStore
 from sim.common.web import sign
 from sim.corpa.api import Tokens, create_app as corpa_app
 from sim.corpa.engine import CorpA
-from sim.corpb.api import create_app as corpb_app
-from sim.corpb.engine import CorpB
+from sim.common.store import MemoryStore
+from tower.adapters.http_mcf import HttpMCFTransport
+from tower.adapters.memory import VirtualClock
 
-SECRETS = {"mcf-client-id": "corpb-pilot", "mcf-client-secret": "s3cret", "partner-corpa-webhook-secret": "whsec",
-           "partner-corpb-api-key": "corpb-key", "corpb-inbound-api-key": "corpb-in", "pii-masking-key": "k"}
 SIZE = 30
-
-
-class Secrets:
-    def get_secret(self, name):
-        return SECRETS[name]
-
-
-def _client_sender(client):
-    def send(method, url, headers, body, timeout=30):
-        r = client.request(method, urlparse(url).path, headers=headers, content=body)
-        return r.status_code, r.content
-    return send
 
 
 @pytest.fixture
 def world():
-    clock = VirtualClock(datetime(2026, 10, 5, 13, 0, tzinfo=timezone.utc))  # a Monday
-    directory = StaticDirectory(
-        roles={"alice@corpb": {f"approver:{c}:corp_b" for c in
-                               ("exception_resolution", "disposition", "replenishment", "distribution_plan")}},
-        pilot_list={"planning_agent", "reporting_agent", "alice@corpb"},
-        contacts={"exception_operator": "ops@corpb", "corp_a_ops": "ops@corpa", "fulfillment_ops": "fops@corpa",
-                  "corp_b_data_contact": "data@corpb", "corp_a_data_contact": "data@corpa",
-                  "corp_b_planner": "planner@corpb"})
-    ports = memory_ports(clock=clock, directory=directory)
-    ports.bus.raise_errors = True
-    wall = lambda: clock.now().timestamp()  # noqa: E731
-
-    gateway = Gateway(ports.bus, SECRETS.__getitem__, clock, wall=wall)
-    gw = TestClient(gateway_app(gateway)).__enter__()  # one portal per client keeps requests cheap
-
-    corpa = CorpA(MemoryStore(), clock, webhook_url="https://gateway/v1/mcf/notifications",
-                  webhook_secret=SECRETS["partner-corpa-webhook-secret"], send=_client_sender(gw),
-                  rng=random.Random(11), catalog_size=SIZE)
-    corpa_http = TestClient(corpa_app(corpa, Tokens(SECRETS["mcf-client-id"], SECRETS["mcf-client-secret"]),
-                                      faults=(0, 0, 0), clock_s=wall)).__enter__()
-    ports.mcf = HttpMCFTransport("https://corpa", Secrets(), opener=_client_sender(corpa_http), clock=wall)
-
-    sleeps = []
-    system = build(ports, PilotConfig(), sleep=sleeps.append)
-
-    def upload(path, data):  # Corp B drops a file; Event Grid tells the bus
-        ports.blobs.write("landing", path, data)
-        ports.bus.publish(Event(topics.FEEDS_ARRIVED, "Microsoft.Storage.BlobCreated",
-                                {"subject": f"/blobServices/default/containers/landing/blobs/{path}"}, clock.now()))
-
-    corpb = CorpB(MemoryStore(), clock, gateway_url="https://gateway", api_key=SECRETS["partner-corpb-api-key"],
-                  upload=upload, send=_client_sender(gw), rng=random.Random(5), orders_per_day=200,
-                  bad_record_rate=0.05, catalog_size=SIZE)
-    corpb_http = TestClient(corpb_app(corpb, SECRETS["corpb-inbound-api-key"])).__enter__()
-    PartnerConnectors(system, corpb_url="https://corpb", secret=SECRETS.__getitem__,
-                      post=lambda url, h, b: corpb_http.post(urlparse(url).path, headers=h, content=b).status_code)
-
-    def run(hours, step_min=10):
-        for _ in range(int(hours * 60 / step_min)):
-            ports.bus.advance(timedelta(minutes=step_min))
-            corpb.tick()
-            corpa.tick()
-
-    yield type("World", (), dict(clock=clock, ports=ports, system=system, corpa=corpa, corpb=corpb, gw=gw,
-                                 run=staticmethod(run), sleeps=sleeps))
-    for c in (gw, corpa_http, corpb_http):
-        c.__exit__(None, None, None)
+    with build_world(catalog_size=SIZE) as w:
+        yield w
 
 
 def test_orders_flow_end_to_end(world):

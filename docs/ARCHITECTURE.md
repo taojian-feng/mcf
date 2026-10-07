@@ -119,9 +119,9 @@ Claude is available on all three clouds (Foundry, Vertex AI, Bedrock), which kee
 ## 6. Repository layout
 
 ```
-mcf-system/
+repo/
   docs/ARCHITECTURE.md        this file
-  mcf/
+  tower/
     core/        ports.py, models.py, events.py, config.py   (no cloud imports)
     services/    audit, approval, governance, integration, handoffs
     agents/      orchestration, exception, planning, reconciliation, disposition, reporting
@@ -129,6 +129,8 @@ mcf-system/
       memory/    in-process bus with virtual time, stores, ledger, notifier, fake MCF API
       azure/     Service Bus, Cosmos, Blob, SQL ledger, Key Vault, Entra, Foundry LLM
     runtime.py   wires ports to adapters from config (MCF_CLOUD=memory|azure|gcp|aws)
+  sim/           Corp A (MCF API) and Corp B (OMS) partner simulators, their own services
+  evals/         simulated world in one process, and evaluations scored against what really happened
   infra/azure/   main.bicep
   tests/         slice tests run fully in memory
 ```

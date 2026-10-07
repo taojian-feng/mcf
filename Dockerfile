@@ -14,7 +14,10 @@ RUN apt-get update \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY tower ./tower
-RUN pip install --no-cache-dir ".[azure]"
+RUN pip install --no-cache-dir ".[azure,eval]"
+# The evaluation job runs the simulated world in-process; it imports from the working directory.
+COPY sim ./sim
+COPY evals ./evals
 
 RUN useradd --uid 10001 --no-create-home tower
 USER tower

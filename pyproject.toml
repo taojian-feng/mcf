@@ -23,6 +23,8 @@ azure = [
   "starlette>=0.40",
   "uvicorn>=0.30",
 ]
+# The evaluations run the simulated partners in-process (Starlette TestClient needs httpx).
+eval = ["httpx>=0.27"]
 dev = ["pytest>=8", "starlette>=0.40", "httpx>=0.27"]
 
 [tool.setuptools.packages.find]

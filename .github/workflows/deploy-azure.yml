@@ -128,7 +128,7 @@ jobs:
             echo "SQL_FQDN=$(out sqlServer)";          echo "SQL_NAME=$(out sqlServerName)"
             echo "SQL_LOCATION=$(out sqlLocation)"
             echo "UAMI_NAME=$(out agentsIdentityName)"; echo "UAMI_CLIENT_ID=$(out agentsIdentityClientId)"
-            echo "CONSOLE_URL=$(out consoleUrl)"
+            echo "CONSOLE_URL=$(out consoleUrl)";      echo "FOUNDRY_RESOURCE=$(out foundryResource)"
             echo "GATEWAY_URL=$(out gatewayUrl)";      echo "CORPA_URL=$(out corpaUrl)"; echo "CORPB_URL=$(out corpbUrl)"
           } >> "$GITHUB_ENV"
 
@@ -201,4 +201,5 @@ jobs:
             echo "- Images: \`${IMAGE:-not built}\`, \`${SIM_IMAGE:-not built}\`"
             if [ -n "${CONSOLE_URL:-}" ]; then echo "- Approval console: $CONSOLE_URL (open it from the link in an approval email)"; fi
             if [ -n "${GATEWAY_URL:-}" ]; then echo "- Partner gateway: $GATEWAY_URL (Corp A MCF API: $CORPA_URL, Corp B OMS: $CORPB_URL)"; fi
+            if [ -n "${FOUNDRY_RESOURCE:-}" ]; then echo "- Claude: Foundry resource \`$FOUNDRY_RESOURCE\`. Deploy the model \`claude-opus-5-5\` there once in ai.azure.com (docs/DEPLOY_AZURE.md, Claude)"; fi
           } >> "$GITHUB_STEP_SUMMARY"

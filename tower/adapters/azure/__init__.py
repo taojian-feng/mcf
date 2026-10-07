@@ -326,24 +326,38 @@ class LogNotifier:
 # ---------------------------------------------------------------- Claude on Microsoft Foundry (LLM)
 
 class FoundryClaude:
-    """Structured outputs via the Anthropic SDK's Foundry client. Any failure or refusal returns
-    None so callers fall back to deterministic rules."""
+    """Structured outputs via the Anthropic SDK's Foundry client, signed in with the app's managed
+    identity (Entra ID), so there is no API key to store. Any failure or refusal returns None so
+    callers fall back to deterministic rules. Keeps call and token counts for evaluations."""
 
-    def __init__(self, resource: str, api_key: str, model: str = "claude-opus-5-5"):
+    def __init__(self, resource: str, credential, model: str = "claude-opus-5-5"):
         from anthropic import AnthropicFoundry
-        self._client = AnthropicFoundry(api_key=api_key, resource=resource)
-        self._model = model
+        from azure.identity import get_bearer_token_provider
+        self._client = AnthropicFoundry(
+            resource=resource,
+            azure_ad_token_provider=get_bearer_token_provider(credential, "https://ai.azure.com/.default"))
+        self.model = model
+        self.calls = self.input_tokens = self.output_tokens = 0
+        self._count = threading.Lock()  # evaluations call from several threads
+        self._log = logging.getLogger("tower.llm")
 
     def structured(self, *, system: str, prompt: str, schema: type[BaseModel]):
         import anthropic
         try:
+            # Thinking is always on for this model and counts toward max_tokens, so leave room for it.
             resp = self._client.messages.parse(
-                model=self._model, max_tokens=2048, system=system,
+                model=self.model, max_tokens=16000, system=system,
                 messages=[{"role": "user", "content": prompt}], output_format=schema,
             )
-        except anthropic.APIError:
+        except anthropic.APIError as e:
+            self._log.warning("Claude call failed, falling back to rules: %s", e)
             return None
-        if resp.stop_reason == "refusal":
+        with self._count:
+            self.calls += 1
+            self.input_tokens += resp.usage.input_tokens
+            self.output_tokens += resp.usage.output_tokens
+        if resp.stop_reason != "end_turn":  # refusal or truncated: the rules decide
+            self._log.warning("Claude stopped with %s, falling back to rules", resp.stop_reason)
             return None
         return resp.parsed_output
 
@@ -361,8 +375,7 @@ def azure_ports():
     directory = AppConfigDirectory(env["MCF_APPCONFIG_URL"], cred)
     llm = None
     if env.get("MCF_FOUNDRY_RESOURCE"):
-        llm = FoundryClaude(env["MCF_FOUNDRY_RESOURCE"], secrets.get_secret("foundry-api-key"),
-                            env.get("MCF_LLM_MODEL", "claude-opus-5-5"))
+        llm = FoundryClaude(env["MCF_FOUNDRY_RESOURCE"], cred, env.get("MCF_LLM_MODEL") or "claude-opus-5-5")
     return Ports(
         clock=SystemClock(),
         bus=ServiceBusBus(env["MCF_SERVICEBUS_NAMESPACE"], cred),
