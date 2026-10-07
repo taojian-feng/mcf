@@ -31,7 +31,7 @@ For production, set `serviceBusSku=Premium` (about $700) and split `agentApps` t
 
 `bootstrap.sh` registers these resource providers for you: `Microsoft.App`, `ServiceBus`, `DocumentDB`, `Sql`,
 `Storage`, `KeyVault`, `AppConfiguration`, `EventGrid`, `OperationalInsights`, `Insights`, `ManagedIdentity`,
-`ContainerRegistry`.
+`ContainerRegistry`, `Communication`.
 
 Default quotas on a pay-as-you-go subscription cover this deployment. The ones that most often get in the way:
 

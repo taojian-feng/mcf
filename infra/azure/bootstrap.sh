@@ -27,7 +27,7 @@ echo "Region: $LOCATION   Resource group: $RG   Repo: $REPO"
 echo "==> Registering resource providers (first time can take a few minutes)"
 PROVIDERS=(Microsoft.App Microsoft.ServiceBus Microsoft.DocumentDB Microsoft.Sql Microsoft.Storage
            Microsoft.KeyVault Microsoft.AppConfiguration Microsoft.EventGrid Microsoft.OperationalInsights
-           Microsoft.Insights Microsoft.ManagedIdentity Microsoft.ContainerRegistry)
+           Microsoft.Insights Microsoft.ManagedIdentity Microsoft.ContainerRegistry Microsoft.Communication)
 for p in "${PROVIDERS[@]}"; do az provider register --namespace "$p" --output none; done
 for p in "${PROVIDERS[@]}"; do
   until [[ "$(az provider show --namespace "$p" --query registrationState -o tsv)" == "Registered" ]]; do
