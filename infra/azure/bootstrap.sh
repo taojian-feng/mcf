@@ -12,7 +12,7 @@
 set -euo pipefail
 
 REPO="${REPO:-taojian-feng/mcf}"
-GH_ENVIRONMENT="${GH_ENVIRONMENT:-azure-dev}"
+GH_REF="${GH_REF:-refs/heads/main}"   # the workflows sign in from this branch
 LOCATION="${LOCATION:-eastus2}"
 RG="${RG:-mcfpilot-dev-rg}"
 APP_NAME="${APP_NAME:-mcfpilot-github-deploy}"
@@ -46,19 +46,24 @@ SP_OBJECT_ID="$(az ad sp list --filter "appId eq '$APP_ID'" --query '[0].id' -o 
 if [[ -z "$SP_OBJECT_ID" ]]; then SP_OBJECT_ID="$(az ad sp create --id "$APP_ID" --query id -o tsv)"; fi
 
 # GitHub sends one of two subject forms: by name, or (newer repos) with immutable owner and repo ids.
-# Register both so the deploy signs in whichever this repo uses.
-SUBJECTS=("repo:${REPO}:environment:${GH_ENVIRONMENT}")
-REPO_META="$(curl -fsS "https://api.github.com/repos/${REPO}" || true)"
-if [[ -n "$REPO_META" ]]; then
-  OWNER_ID="$(jq -r .owner.id <<<"$REPO_META")"; REPO_NUM="$(jq -r .id <<<"$REPO_META")"
-  SUBJECTS+=("repo:${REPO%%/*}@${OWNER_ID}/${REPO#*/}@${REPO_NUM}:environment:${GH_ENVIRONMENT}")
+# Register both so the deploy signs in whichever this repo uses. The ids come from the GitHub API
+# (OWNER_ID / REPO_NUM override it, e.g. for a private repo the anonymous API can't see).
+SUBJECTS=("repo:${REPO}:ref:${GH_REF}")
+if [[ -z "${OWNER_ID:-}" || -z "${REPO_NUM:-}" ]]; then
+  REPO_META="$(curl -fsS "https://api.github.com/repos/${REPO}" || true)"
+  if [[ -n "$REPO_META" ]]; then OWNER_ID="$(jq -r .owner.id <<<"$REPO_META")"; REPO_NUM="$(jq -r .id <<<"$REPO_META")"; fi
+fi
+if [[ -n "${OWNER_ID:-}" && -n "${REPO_NUM:-}" ]]; then
+  SUBJECTS+=("repo:${REPO%%/*}@${OWNER_ID}/${REPO#*/}@${REPO_NUM}:ref:${GH_REF}")
+else
+  echo "    Could not look up the repo ids; set OWNER_ID and REPO_NUM if sign-in fails with AADSTS700213."
 fi
 i=0
 for SUBJECT in "${SUBJECTS[@]}"; do
   i=$((i + 1))
   if [[ -z "$(az ad app federated-credential list --id "$APP_ID" --query "[?subject=='$SUBJECT'].name" -o tsv)" ]]; then
     az ad app federated-credential create --id "$APP_ID" --output none --parameters "{
-      \"name\": \"github-${GH_ENVIRONMENT}-${i}\",
+      \"name\": \"github-main-${i}\",
       \"issuer\": \"https://token.actions.githubusercontent.com\",
       \"subject\": \"${SUBJECT}\",
       \"audiences\": [\"api://AzureADTokenExchange\"]

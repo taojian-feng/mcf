@@ -25,6 +25,9 @@ param sqlAdminGroupName string
 @description('Days consumer PII is kept before Cosmos TTL deletes it (R9.5)')
 param piiRetentionDays int = 90
 
+@description('Send notifications by email (Azure Communication Services with a free Azure-managed sender domain). Off: notifications are only logged.')
+param enableEmail bool = true
+
 @description('Region for the audit database. Busy regions sometimes refuse new Azure SQL servers; the rest of the stack stays in location.')
 param sqlLocation string = location
 
@@ -299,7 +302,7 @@ resource feedToBus 'Microsoft.EventGrid/systemTopics/eventSubscriptions@2023-12-
 
 // ------------------------------------------------------------------ Container Apps
 
-var commonEnv = [
+var commonEnv = concat([
   { name: 'MCF_CLOUD', value: 'azure' }
   { name: 'MCF_API_MODE', value: mcfApiMode }
   { name: 'AZURE_CLIENT_ID', value: uami.properties.clientId }
@@ -312,7 +315,38 @@ var commonEnv = [
   { name: 'MCF_KEYVAULT_URL', value: kv.properties.vaultUri }
   { name: 'MCF_APPCONFIG_URL', value: appcfg.properties.endpoint }
   { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appi.properties.ConnectionString }
-]
+], enableEmail ? [
+  { name: 'MCF_ACS_ENDPOINT', value: 'https://${acs!.properties.hostName}' }
+  { name: 'MCF_EMAIL_SENDER', value: 'DoNotReply@${emailDomain!.properties.mailFromSenderDomain}' }
+] : [])
+// ------------------------------------------------------------------ Email (Azure Communication Services)
+
+resource emailSvc 'Microsoft.Communication/emailServices@2023-04-01' = if (enableEmail) {
+  name: '${prefix}-email-${suffix}'
+  location: 'global'
+  properties: { dataLocation: 'United States' }
+}
+
+resource emailDomain 'Microsoft.Communication/emailServices/domains@2023-04-01' = if (enableEmail) {
+  parent: emailSvc
+  name: 'AzureManagedDomain'
+  location: 'global'
+  properties: { domainManagement: 'AzureManaged', userEngagementTracking: 'Disabled' }
+}
+
+resource acs 'Microsoft.Communication/communicationServices@2023-04-01' = if (enableEmail) {
+  name: '${prefix}-acs-${suffix}'
+  location: 'global'
+  properties: { dataLocation: 'United States', linkedDomains: [ emailDomain.id ] }
+}
+
+// The agents send email with their managed identity.
+resource roleAcs 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableEmail) {
+  scope: acs
+  name: guid(acs.id, uami.id, 'contributor')
+  properties: { principalId: uami.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c') }
+}
+
 var registries = [ { server: acr.properties.loginServer, identity: uami.id } ]
 
 resource cae 'Microsoft.App/managedEnvironments@2024-03-01' = {
@@ -461,5 +495,6 @@ output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
 output sqlServerName string = sql.name
 output sqlLocation string = sqlLocation
+output emailSender string = enableEmail ? 'DoNotReply@${emailDomain!.properties.mailFromSenderDomain}' : ''
 output agentsIdentityName string = uami.name
 output containerAppNames array = [for a in agentApps: '${prefix}-${a}']
