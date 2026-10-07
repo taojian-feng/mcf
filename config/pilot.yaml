@@ -4,7 +4,7 @@
 # approves everything and gets every alert. Fill in other slots as real owners are named.
 # Lists take one or more emails, e.g. [ann@corpb.com, raj@corpb.com].
 
-default_email: ""
+default_email: "fengtaojian123@yahoo.com"
 
 corp_b:
   approvers:                  # who can approve each kind of Corp B decision
