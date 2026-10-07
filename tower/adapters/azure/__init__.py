@@ -323,19 +323,21 @@ class LogNotifier:
         print(json.dumps({"notification": entry}), flush=True)
 
 
-# ---------------------------------------------------------------- Claude on Microsoft Foundry (LLM)
+# ---------------------------------------------------------------- Claude (LLM): Microsoft Foundry or Anthropic API
 
 class FoundryClaude:
     """Structured outputs via the Anthropic SDK's Foundry client, signed in with the app's managed
     identity (Entra ID), so there is no API key to store. Any failure or refusal returns None so
     callers fall back to deterministic rules. Keeps call and token counts for evaluations."""
 
-    def __init__(self, resource: str, credential, model: str = "claude-opus-5-5"):
-        from anthropic import AnthropicFoundry
-        from azure.identity import get_bearer_token_provider
-        self._client = AnthropicFoundry(
-            resource=resource,
-            azure_ad_token_provider=get_bearer_token_provider(credential, "https://ai.azure.com/.default"))
+    def __init__(self, resource: str, credential, model: str = "claude-opus-5-5", *, client=None):
+        if client is None:
+            from anthropic import AnthropicFoundry
+            from azure.identity import get_bearer_token_provider
+            client = AnthropicFoundry(
+                resource=resource,
+                azure_ad_token_provider=get_bearer_token_provider(credential, "https://ai.azure.com/.default"))
+        self._client = client
         self.model = model
         self.calls = self.input_tokens = self.output_tokens = 0
         self._count = threading.Lock()  # evaluations call from several threads
@@ -362,6 +364,29 @@ class FoundryClaude:
         return resp.parsed_output
 
 
+class AnthropicClaude(FoundryClaude):
+    """The same model straight from Anthropic's API, for subscriptions where Foundry has no Claude quota.
+    The key lives in Key Vault as `anthropic-api-key`."""
+
+    def __init__(self, api_key: str, model: str = "claude-opus-5-5"):
+        from anthropic import Anthropic
+        super().__init__("", None, model, client=Anthropic(api_key=api_key))
+
+
+def _claude(env, secrets: "KeyVaultSecrets", cred):
+    """An Anthropic API key in Key Vault wins (it works on any subscription); otherwise Foundry if configured."""
+    model = env.get("MCF_LLM_MODEL") or "claude-opus-5-5"
+    try:
+        key = secrets.get_secret("anthropic-api-key")
+    except Exception:  # not set (the usual case on Foundry) or vault unreachable
+        key = None
+    if key:
+        return AnthropicClaude(key, model)
+    if env.get("MCF_FOUNDRY_RESOURCE"):
+        return FoundryClaude(env["MCF_FOUNDRY_RESOURCE"], cred, model)
+    return None
+
+
 # ---------------------------------------------------------------- composition
 
 def azure_ports():
@@ -373,9 +398,7 @@ def azure_ports():
     cred = _credential()
     secrets = KeyVaultSecrets(env["MCF_KEYVAULT_URL"], cred)
     directory = AppConfigDirectory(env["MCF_APPCONFIG_URL"], cred)
-    llm = None
-    if env.get("MCF_FOUNDRY_RESOURCE"):
-        llm = FoundryClaude(env["MCF_FOUNDRY_RESOURCE"], cred, env.get("MCF_LLM_MODEL") or "claude-opus-5-5")
+    llm = _claude(env, secrets, cred)
     return Ports(
         clock=SystemClock(),
         bus=ServiceBusBus(env["MCF_SERVICEBUS_NAMESPACE"], cred),

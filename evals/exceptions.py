@@ -15,7 +15,7 @@ What matters most is "wrong and acted on": a confident wrong answer starts the w
 person looking. Then accuracy, and how much goes to a human.
 
   python -m evals.exceptions --days 7                    # rules only, no model needed
-  python -m evals.exceptions --days 14 --arms all        # needs Claude (MCF_FOUNDRY_RESOURCE) on Azure
+  python -m evals.exceptions --days 14 --arms all        # needs Claude on Azure (Foundry, or anthropic-api-key in Key Vault)
 """
 from __future__ import annotations
 
@@ -236,7 +236,7 @@ def main(argv: list[str] | None = None) -> str:
         ports = from_env()
         llm = ports.llm
         if llm is None:
-            raise SystemExit("arms other than 'rules' need Claude: set MCF_FOUNDRY_RESOURCE (MCF_CLOUD=azure)")
+            raise SystemExit("arms other than 'rules' need Claude: deploy it in Foundry or put anthropic-api-key in Key Vault (MCF_CLOUD=azure)")
 
     from tower.core.config import PilotConfig
     threshold = PilotConfig().classification_confidence_threshold
