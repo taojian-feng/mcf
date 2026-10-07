@@ -37,6 +37,15 @@ class Ports:
     llm: LLM | None
     masking_key: bytes
     secrets: SecretStore | None = None
+    console_url: str | None = None      # where approvers open the approval console
+
+
+def approval_links(ports: Ports):
+    """Signed console links for approval emails, when a console is deployed."""
+    if not (ports.console_url and ports.secrets):
+        return None
+    from tower.services.approval_links import LINK_KEY_SECRET, ApprovalLinks
+    return ApprovalLinks(ports.console_url, ports.secrets.get_secret(LINK_KEY_SECRET).encode(), ports.clock)
 
 
 @dataclass
@@ -74,7 +83,8 @@ def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] |
                                    cache_ttl_s=config.authorization_list_cache_ttl.total_seconds())
     kw: dict[str, Any] = {"sleep": sleep} if sleep else {}
     integration = IntegrationLayer(ports.mcf, audit, ports.notifier, ports.blobs, ports.clock, config.retry, **kw)
-    approvals = ApprovalService(ports.store, ports.bus, ports.directory, ports.notifier, audit, ports.clock, config)
+    approvals = ApprovalService(ports.store, ports.bus, ports.directory, ports.notifier, audit, ports.clock, config,
+                                links=approval_links(ports))
     handoffs = HandoffService(ports.store, ports.bus, ports.directory, ports.notifier, audit, ports.clock, config)
     orchestration = OrchestrationAgent(ports.store, ports.bus, integration, governance, audit, handoffs,
                                        ports.clock, config)

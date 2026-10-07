@@ -376,4 +376,5 @@ def azure_ports():
         llm=llm,
         masking_key=secrets.get_secret("pii-masking-key").encode(),
         secrets=secrets,
+        console_url=env.get("MCF_CONSOLE_URL") or None,
     )
