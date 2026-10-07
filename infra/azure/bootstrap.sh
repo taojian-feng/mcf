@@ -45,15 +45,26 @@ if [[ -z "$APP_ID" ]]; then APP_ID="$(az ad app create --display-name "$APP_NAME
 SP_OBJECT_ID="$(az ad sp list --filter "appId eq '$APP_ID'" --query '[0].id' -o tsv)"
 if [[ -z "$SP_OBJECT_ID" ]]; then SP_OBJECT_ID="$(az ad sp create --id "$APP_ID" --query id -o tsv)"; fi
 
-SUBJECT="repo:${REPO}:environment:${GH_ENVIRONMENT}"
-if [[ -z "$(az ad app federated-credential list --id "$APP_ID" --query "[?subject=='$SUBJECT'].name" -o tsv)" ]]; then
-  az ad app federated-credential create --id "$APP_ID" --output none --parameters "{
-    \"name\": \"github-${GH_ENVIRONMENT}\",
-    \"issuer\": \"https://token.actions.githubusercontent.com\",
-    \"subject\": \"${SUBJECT}\",
-    \"audiences\": [\"api://AzureADTokenExchange\"]
-  }"
+# GitHub sends one of two subject forms: by name, or (newer repos) with immutable owner and repo ids.
+# Register both so the deploy signs in whichever this repo uses.
+SUBJECTS=("repo:${REPO}:environment:${GH_ENVIRONMENT}")
+REPO_META="$(curl -fsS "https://api.github.com/repos/${REPO}" || true)"
+if [[ -n "$REPO_META" ]]; then
+  OWNER_ID="$(jq -r .owner.id <<<"$REPO_META")"; REPO_NUM="$(jq -r .id <<<"$REPO_META")"
+  SUBJECTS+=("repo:${REPO%%/*}@${OWNER_ID}/${REPO#*/}@${REPO_NUM}:environment:${GH_ENVIRONMENT}")
 fi
+i=0
+for SUBJECT in "${SUBJECTS[@]}"; do
+  i=$((i + 1))
+  if [[ -z "$(az ad app federated-credential list --id "$APP_ID" --query "[?subject=='$SUBJECT'].name" -o tsv)" ]]; then
+    az ad app federated-credential create --id "$APP_ID" --output none --parameters "{
+      \"name\": \"github-${GH_ENVIRONMENT}-${i}\",
+      \"issuer\": \"https://token.actions.githubusercontent.com\",
+      \"subject\": \"${SUBJECT}\",
+      \"audiences\": [\"api://AzureADTokenExchange\"]
+    }"
+  fi
+done
 
 echo "==> Roles for the deploy app, scoped to the resource group only"
 # Contributor creates resources; RBAC Administrator lets the template grant the agents' identity its data roles.
