@@ -1,8 +1,10 @@
 // MCF Agentic Fulfillment Orchestration: Azure foundation (pilot scale).
 // Deploy: see docs/DEPLOY_AZURE.md (GitHub Actions workflow .github/workflows/deploy-azure.yml).
 // Defaults are sized for a dev environment; set serviceBusSku=Premium and agentApps to one app per agent for the pilot.
-// Not yet included (next iteration): private endpoints + VNet integration, APIM, Communication Services email domain,
-// Microsoft Foundry deployment, Purview. See docs/ARCHITECTURE.md section 4.
+// Partners: Corp A (MCF API) and Corp B (order management, feeds) run as simulators in their own Container Apps with
+// their own identities and databases, talking to the system only over HTTPS (docs/PARTNER_APIS.md).
+// Not yet included (next iteration): private endpoints + VNet integration, APIM, Microsoft Foundry deployment, Purview.
+// See docs/ARCHITECTURE.md section 4.
 
 @description('Short lowercase prefix for resource names')
 param prefix string = 'mcfpilot'
@@ -14,9 +16,15 @@ param image string = 'mcr.microsoft.com/k8se/quickstart:latest'
 param serviceBusSku string = 'Standard'
 @description('Long-running consumer apps. Every app runs every agent handler as competing consumers, so one app is enough for dev.')
 param agentApps array = [ 'all' ]
-@description('sandbox: in-process fake MCF API (no Corp A endpoint yet). live: call MCF_API_BASE_URL.')
-@allowed([ 'sandbox', 'live' ])
-param mcfApiMode string = 'sandbox'
+@description('Partner simulators image (sim/Dockerfile). The first deploy uses the public placeholder.')
+param simImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
+@description('Run the Corp A and Corp B simulators, the partner gateway, and call Corp A over HTTPS. Off: an in-process fake MCF API and no partner traffic.')
+param enablePartners bool = true
+@description('Average consumer orders per day that the Corp B simulator places.')
+param corpbOrdersPerDay string = '140'
+@description('Audit database size. S0 (~$15/month) never pauses and easily takes the pilot load; GP_S_Gen5_2 is serverless, which only saves money while idle.')
+@allowed([ 'S0', 'S1', 'GP_S_Gen5_2' ])
+param sqlSku string = 'S0'
 @description('Object id of the principal that deploys (the GitHub Actions service principal); gets Key Vault secret write access.')
 param deployerPrincipalId string = ''
 @description('Entra ID group that administers the audit SQL database')
@@ -40,6 +48,7 @@ var topics = [
   'exceptions.updates'
   'approvals.decisions'
   'handoffs.events'
+  'handoffs.updates'
   'timers'
   'feeds.arrived'
   'inventory.events'
@@ -53,7 +62,7 @@ var subscriptions = [
   { name: 'orchestration-agent', topics: [ 'orders.received', 'orders.lifecycle', 'exceptions.updates', 'timers' ] }
   { name: 'exception-agent', topics: [ 'exceptions.signals', 'approvals.decisions', 'handoffs.events', 'timers' ] }
   { name: 'approval-workflow', topics: [ 'timers' ] }
-  { name: 'handoff-tracker', topics: [ 'timers' ] }
+  { name: 'handoff-tracker', topics: [ 'timers', 'handoffs.updates' ] }
   { name: 'reconciliation-agent', topics: [ 'inventory.events' ] }
   { name: 'planning-agent', topics: [ 'inventory.state', 'approvals.decisions', 'timers' ] }
   { name: 'disposition-agent', topics: [ 'approvals.decisions', 'disposition.events', 'timers' ] }
@@ -61,6 +70,7 @@ var subscriptions = [
   { name: 'oms-connector', topics: [ 'oms.outbound' ] }
   { name: 'corpb-connector', topics: [ 'corpb.outbound' ] }
   { name: 'integration-layer', topics: [ 'feeds.arrived' ] }
+  { name: 'corpa-connector', topics: [ 'handoffs.events' ] }
 ]
 var subscriptionPairs = flatten(map(subscriptions, s => map(s.topics, t => { sub: s.name, topic: t })))
 var containers = [
@@ -163,6 +173,19 @@ resource cosmosContainers 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/co
   }
 }]
 
+// Each simulated partner keeps its own state in its own database, reachable only by its own identity.
+resource partnerDbs 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = [for p in [ 'corpa', 'corpb' ]: if (enablePartners) {
+  parent: cosmos
+  name: p
+  properties: { resource: { id: p } }
+}]
+
+resource partnerState 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = [for (p, i) in [ 'corpa', 'corpb' ]: if (enablePartners) {
+  parent: partnerDbs[i]
+  name: 'state'
+  properties: { resource: { id: 'state', partitionKey: { paths: [ '/id' ], kind: 'Hash' } } }
+}]
+
 // CorpB_Insight_Data lives in its own account so Corp A retail identities have no data-plane path (R9.1).
 resource insightCosmos 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
   name: '${prefix}-insight-${suffix}'
@@ -254,12 +277,14 @@ resource sql 'Microsoft.Sql/servers@2023-08-01-preview' = {
   }
 }
 
+var sqlServerless = sqlSku == 'GP_S_Gen5_2'
 resource sqlDb 'Microsoft.Sql/servers/databases@2023-08-01-preview' = {
   parent: sql
   name: 'mcf-audit'
   location: sqlLocation
-  sku: { name: 'GP_S_Gen5_2', tier: 'GeneralPurpose' }
-  properties: { isLedgerOn: true, autoPauseDelay: 60, minCapacity: json('0.5') } // every table is a ledger table; DDL in sql/audit.sql makes them append-only
+  sku: sqlServerless ? { name: sqlSku, tier: 'GeneralPurpose' } : { name: sqlSku, tier: 'Standard' }
+  // every table is a ledger table; DDL in sql/audit.sql makes them append-only
+  properties: union({ isLedgerOn: true }, sqlServerless ? { autoPauseDelay: 60, minCapacity: json('0.5') } : {})
 }
 
 // Container Apps reach SQL over the Azure backbone. Replace with a private endpoint for the pilot.
@@ -302,9 +327,8 @@ resource feedToBus 'Microsoft.EventGrid/systemTopics/eventSubscriptions@2023-12-
 
 // ------------------------------------------------------------------ Container Apps
 
-var commonEnv = concat([
+var baseEnv = concat([
   { name: 'MCF_CLOUD', value: 'azure' }
-  { name: 'MCF_API_MODE', value: mcfApiMode }
   { name: 'AZURE_CLIENT_ID', value: uami.properties.clientId }
   { name: 'MCF_SERVICEBUS_NAMESPACE', value: '${sb.name}.servicebus.windows.net' }
   { name: 'MCF_COSMOS_URL', value: cosmos.properties.documentEndpoint }
@@ -319,6 +343,13 @@ var commonEnv = concat([
   { name: 'MCF_ACS_ENDPOINT', value: 'https://${acs!.properties.hostName}' }
   { name: 'MCF_EMAIL_SENDER', value: 'DoNotReply@${emailDomain!.properties.mailFromSenderDomain}' }
 ] : [])
+// Agents and jobs also know where the partners are; the gateway does not need to (and must not, or the
+// partners' webhook URL would depend on themselves).
+var commonEnv = concat(baseEnv, enablePartners ? [
+  { name: 'MCF_API_MODE', value: 'live' }
+  { name: 'MCF_API_BASE_URL', value: 'https://${corpaApp!.properties.configuration.ingress.fqdn}' }
+  { name: 'MCF_CORPB_URL', value: 'https://${corpbApp!.properties.configuration.ingress.fqdn}' }
+] : [ { name: 'MCF_API_MODE', value: 'sandbox' } ])
 // ------------------------------------------------------------------ Email (Azure Communication Services)
 
 resource emailSvc 'Microsoft.Communication/emailServices@2023-04-01' = if (enableEmail) {
@@ -416,6 +447,170 @@ resource scheduledJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: {
   dependsOn: [ roleAcr ]
 }]
 
+// ------------------------------------------------------------------ Partner gateway and partner simulators
+
+// The placeholder image serves on port 80 and has no Python; real images serve on 8080.
+var agentsPlaceholder = startsWith(image, 'mcr.microsoft.com/')
+var simPlaceholder = startsWith(simImage, 'mcr.microsoft.com/')
+
+// Front door for Corp B orders and Corp A webhooks. Authenticates partners and publishes to the bus.
+resource gatewayApp 'Microsoft.App/containerApps@2024-03-01' = if (enablePartners) {
+  name: '${prefix}-gateway'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
+  properties: {
+    managedEnvironmentId: cae.id
+    configuration: {
+      registries: registries
+      ingress: { external: true, targetPort: agentsPlaceholder ? 80 : 8080, transport: 'auto', allowInsecure: false }
+    }
+    template: {
+      containers: [ {
+        name: 'gateway'
+        image: image
+        command: agentsPlaceholder ? null : [ 'python', '-m', 'mcf.edge.gateway' ]
+        resources: { cpu: json('0.25'), memory: '0.5Gi' }
+        env: concat(baseEnv, [ { name: 'PORT', value: '8080' } ])
+      } ]
+      scale: { minReplicas: 1, maxReplicas: 3 }
+    }
+  }
+  dependsOn: [ roleAcr ]
+}
+
+resource corpaId 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (enablePartners) {
+  name: '${prefix}-corpa-id'
+  location: location
+}
+
+resource corpbId 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (enablePartners) {
+  name: '${prefix}-corpb-id'
+  location: location
+}
+
+// Corp A: the MCF API and the fulfillment network behind it. One replica: it is the single writer of its inventory.
+resource corpaApp 'Microsoft.App/containerApps@2024-03-01' = if (enablePartners) {
+  name: '${prefix}-corpa-mcf'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${corpaId.id}': {} } }
+  properties: {
+    managedEnvironmentId: cae.id
+    configuration: {
+      registries: [ { server: acr.properties.loginServer, identity: corpaId.id } ]
+      ingress: { external: true, targetPort: simPlaceholder ? 80 : 8080, transport: 'auto', allowInsecure: false }
+    }
+    template: {
+      containers: [ {
+        name: 'corpa'
+        image: simImage
+        command: simPlaceholder ? null : [ 'python', '-m', 'sim.corpa' ]
+        resources: { cpu: json('0.25'), memory: '0.5Gi' }
+        env: [
+          { name: 'AZURE_CLIENT_ID', value: corpaId!.properties.clientId }
+          { name: 'SIM_KEYVAULT_URL', value: kv.properties.vaultUri }
+          { name: 'SIM_COSMOS_URL', value: cosmos.properties.documentEndpoint }
+          { name: 'SIM_COSMOS_DB', value: 'corpa' }
+          { name: 'CORPA_WEBHOOK_URL', value: 'https://${gatewayApp!.properties.configuration.ingress.fqdn}/v1/mcf/notifications' }
+        ]
+      } ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+  dependsOn: [ roleCorpaAcr, partnerState ]
+}
+
+// Corp B: order management (sends orders, receives updates) and the weekly planning files.
+resource corpbApp 'Microsoft.App/containerApps@2024-03-01' = if (enablePartners) {
+  name: '${prefix}-corpb-oms'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${corpbId.id}': {} } }
+  properties: {
+    managedEnvironmentId: cae.id
+    configuration: {
+      registries: [ { server: acr.properties.loginServer, identity: corpbId.id } ]
+      ingress: { external: true, targetPort: simPlaceholder ? 80 : 8080, transport: 'auto', allowInsecure: false }
+    }
+    template: {
+      containers: [ {
+        name: 'corpb'
+        image: simImage
+        command: simPlaceholder ? null : [ 'python', '-m', 'sim.corpb' ]
+        resources: { cpu: json('0.25'), memory: '0.5Gi' }
+        env: [
+          { name: 'AZURE_CLIENT_ID', value: corpbId!.properties.clientId }
+          { name: 'SIM_KEYVAULT_URL', value: kv.properties.vaultUri }
+          { name: 'SIM_COSMOS_URL', value: cosmos.properties.documentEndpoint }
+          { name: 'SIM_COSMOS_DB', value: 'corpb' }
+          { name: 'CORPB_GATEWAY_URL', value: 'https://${gatewayApp!.properties.configuration.ingress.fqdn}' }
+          { name: 'CORPB_LANDING_URL', value: storage.properties.primaryEndpoints.blob }
+          { name: 'CORPB_ORDERS_PER_DAY', value: corpbOrdersPerDay }
+        ]
+      } ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+  dependsOn: [ roleCorpbAcr, partnerState ]
+}
+
+resource landing 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' existing = {
+  parent: blobSvc
+  name: 'landing'
+}
+
+resource roleCorpaAcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
+  scope: acr
+  name: guid(acr.id, '${prefix}-corpa-id', roles.acrPull)
+  properties: { principalId: corpaId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull) }
+}
+
+resource roleCorpbAcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
+  scope: acr
+  name: guid(acr.id, '${prefix}-corpb-id', roles.acrPull)
+  properties: { principalId: corpbId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull) }
+}
+
+// Shared partner credentials (OAuth client, webhook secret, API keys) are seeded by the deploy workflow.
+resource roleCorpaKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
+  scope: kv
+  name: guid(kv.id, '${prefix}-corpa-id', roles.keyVaultSecretsUser)
+  properties: { principalId: corpaId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.keyVaultSecretsUser) }
+}
+
+resource roleCorpbKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
+  scope: kv
+  name: guid(kv.id, '${prefix}-corpb-id', roles.keyVaultSecretsUser)
+  properties: { principalId: corpbId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.keyVaultSecretsUser) }
+}
+
+// Corp B drops planning files into the landing container only.
+resource roleCorpbLanding 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
+  scope: landing
+  name: guid(storage.id, 'landing', '${prefix}-corpb-id', roles.storageBlobDataContributor)
+  properties: { principalId: corpbId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.storageBlobDataContributor) }
+  dependsOn: [ blobContainers ]
+}
+
+resource roleCorpaCosmos 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = if (enablePartners) {
+  parent: cosmos
+  name: guid(cosmos.id, '${prefix}-corpa-id', 'corpa-db')
+  properties: {
+    principalId: corpaId!.properties.principalId
+    roleDefinitionId: '${cosmos.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002'
+    scope: '${cosmos.id}/dbs/corpa'
+  }
+}
+
+resource roleCorpbCosmos 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = if (enablePartners) {
+  parent: cosmos
+  name: guid(cosmos.id, '${prefix}-corpb-id', 'corpb-db')
+  properties: {
+    principalId: corpbId!.properties.principalId
+    roleDefinitionId: '${cosmos.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002'
+    scope: '${cosmos.id}/dbs/corpb'
+  }
+  dependsOn: [ roleCorpaCosmos ] // Cosmos accepts one role assignment write at a time
+}
+
 // ------------------------------------------------------------------ RBAC for the agents' managed identity
 
 var roles = {
@@ -498,3 +693,6 @@ output sqlLocation string = sqlLocation
 output emailSender string = enableEmail ? 'DoNotReply@${emailDomain!.properties.mailFromSenderDomain}' : ''
 output agentsIdentityName string = uami.name
 output containerAppNames array = [for a in agentApps: '${prefix}-${a}']
+output gatewayUrl string = enablePartners ? 'https://${gatewayApp!.properties.configuration.ingress.fqdn}' : ''
+output corpaUrl string = enablePartners ? 'https://${corpaApp!.properties.configuration.ingress.fqdn}' : ''
+output corpbUrl string = enablePartners ? 'https://${corpbApp!.properties.configuration.ingress.fqdn}' : ''

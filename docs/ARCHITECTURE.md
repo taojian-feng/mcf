@@ -151,6 +151,6 @@ These are configuration, not design blockers; the code takes them as config with
 1. Thresholds: min ATS cover days, imbalance %, discrepancy units, aging and disposition days, anomaly %, replenishment value threshold, exception confidence threshold, resolution time limits per category.
 2. Retention periods for audit, inventory history and PII.
 3. Responsibility matrix (process action to Owning_Party) and escalation contacts.
-4. Real MCF API contract (SP-API style auth, endpoints, sandbox access) and the Corp B export format spec.
+4. Real MCF API contract and the Corp B export format spec. Until then the system runs against simulated partners that follow the contract in [PARTNER_APIS.md](PARTNER_APIS.md).
 5. Approver roster per category and Owning_Party, plus backups.
 6. Which Azure region(s) and whether Corp B and Corp A data must live in separate subscriptions or tenants.

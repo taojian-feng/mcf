@@ -20,8 +20,10 @@ azure = [
   "azure-communication-email>=1.0",
   "pyodbc>=5.1",
   "anthropic>=0.70",
+  "starlette>=0.40",
+  "uvicorn>=0.30",
 ]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "starlette>=0.40", "httpx>=0.27"]
 
 [tool.setuptools.packages.find]
 include = ["mcf*"]

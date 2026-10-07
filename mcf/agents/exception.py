@@ -263,6 +263,8 @@ class ExceptionAgent:
     # ---------------------------------------------------------------- handoffs, closure, ageing (R3.7, R3.10)
 
     def on_handoff(self, event: Event) -> None:
+        if event.type != "completed":
+            return
         case_id = (event.payload.get("context") or {}).get("case_id")
         case = self._load(case_id) if case_id else None
         if case is None or event.payload["handoff_id"] not in case.pending_handoffs:

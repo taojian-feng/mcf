@@ -10,13 +10,16 @@ Environment variables (set by infra/azure/main.bicep outputs):
   MCF_KEYVAULT_URL           https://<kv>.vault.azure.net/
   MCF_APPCONFIG_URL          https://<cfg>.azconfig.io
   MCF_ACS_ENDPOINT / MCF_EMAIL_SENDER    (optional; without them notifications are logged to stdout)
-  MCF_API_MODE               sandbox (in-process fake MCF API) | live (MCF_API_BASE_URL)
+  MCF_API_MODE               sandbox (in-process fake MCF API) | live (MCF_API_BASE_URL, OAuth2 client
+                             credentials from Key Vault secrets mcf-client-id / mcf-client-secret)
+  MCF_CORPB_URL              Corp B endpoint for OMS and other outbound messages (key: corpb-inbound-api-key)
   MCF_FOUNDRY_RESOURCE / MCF_LLM_MODEL   (optional; Claude on Microsoft Foundry)
   MCF_SUBSCRIPTION           subscription name this process consumes as (one per agent)
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import struct
 import threading
@@ -27,6 +30,8 @@ from pydantic import BaseModel
 
 from mcf.core.models import AuditRecord
 from mcf.core.ports import Event, Handler
+
+log = logging.getLogger("mcf.azure")
 
 
 def _credential():
@@ -94,17 +99,33 @@ class ServiceBusBus:
             t.join()
 
     def _pump(self, topic: str, subscription: str, handler: Handler) -> None:
-        with self._client.get_subscription_receiver(topic_name=topic, subscription_name=subscription) as rx:
+        """Long handlers (a 1,360-item forecast file) keep their lock: the renewer extends it for up to an hour."""
+        from azure.servicebus import AutoLockRenewer
+        renewer = AutoLockRenewer(max_lock_renewal_duration=3600)
+        with self._client.get_subscription_receiver(topic_name=topic, subscription_name=subscription,
+                                                    auto_lock_renewer=renewer) as rx:
             for msg in rx:
-                body = json.loads(b"".join(msg.body))
-                event = Event(topic=topic, type=body["type"], payload=body["payload"],
-                              occurred_at=datetime.fromisoformat(body["occurred_at"]),
-                              event_id=body["event_id"], correlation_id=body.get("correlation_id"))
                 try:
-                    handler(event)
+                    handler(_to_event(topic, msg))
                     rx.complete_message(msg)
                 except Exception:
+                    log.exception("%s/%s: handler failed; message will be redelivered", topic, subscription)
                     rx.abandon_message(msg)
+
+
+def _to_event(topic: str, msg) -> Event:
+    """Our own envelope, or an Event Grid event (feed files: Microsoft.Storage.BlobCreated)."""
+    body = json.loads(b"".join(msg.body))
+    if isinstance(body, list):
+        body = body[0]
+    if "payload" in body and "type" in body:
+        return Event(topic=topic, type=body["type"], payload=body["payload"],
+                     occurred_at=datetime.fromisoformat(body["occurred_at"]),
+                     event_id=body["event_id"], correlation_id=body.get("correlation_id"))
+    when = body.get("eventTime") or body.get("time")
+    return Event(topic=topic, type=body.get("eventType") or body.get("type") or "external", payload=body,
+                 occurred_at=datetime.fromisoformat(when.replace("Z", "+00:00")) if when else datetime.now(timezone.utc),
+                 event_id=str(body.get("id") or msg.message_id), correlation_id=body.get("subject"))
 
 
 # ---------------------------------------------------------------- Cosmos DB (DocumentStore)
@@ -211,12 +232,21 @@ class SqlLedger:
 # ---------------------------------------------------------------- Key Vault (SecretStore)
 
 class KeyVaultSecrets:
-    def __init__(self, vault_url: str, credential=None):
+    """Values are cached for a few minutes, so a rotated secret is picked up without a restart."""
+
+    def __init__(self, vault_url: str, credential=None, *, ttl_s: float = 300):
         from azure.keyvault.secrets import SecretClient
         self._client = SecretClient(vault_url, credential or _credential())
+        self._ttl, self._cache = ttl_s, {}
 
     def get_secret(self, name: str) -> str:
-        return self._client.get_secret(name).value
+        import time
+        hit = self._cache.get(name)
+        if hit and hit[1] > time.monotonic():
+            return hit[0]
+        value = self._client.get_secret(name).value
+        self._cache[name] = (value, time.monotonic() + self._ttl)
+        return value
 
 
 # ---------------------------------------------------------------- App Configuration (Directory)
@@ -345,4 +375,5 @@ def azure_ports():
         mcf=(HttpMCFTransport(env["MCF_API_BASE_URL"], secrets) if env.get("MCF_API_MODE") == "live" else FakeMCF()),
         llm=llm,
         masking_key=secrets.get_secret("pii-masking-key").encode(),
+        secrets=secrets,
     )

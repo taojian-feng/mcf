@@ -29,6 +29,7 @@ class HandoffService:
         self.store, self.bus, self.directory = store, bus, directory
         self.notifier, self.audit, self.clock, self.config = notifier, audit, clock, config
         bus.subscribe(topics.TIMERS, self._on_timer, subscription="handoff-tracker")
+        bus.subscribe(topics.HANDOFF_UPDATES, self._on_update, subscription="handoff-tracker")
 
     # ---------------------------------------------------------------- attribution (R11.1, R11.6)
 
@@ -61,7 +62,22 @@ class HandoffService:
                            f"Action requested: {action}", f"handoff {h.handoff_id} due {h.due_at.isoformat()}")
         self._timer("handoff_ack_check", h, now + self.config.handoff_ack_window)
         self._timer("handoff_due_check", h, h.due_at)
+        self.bus.publish(Event(topics.HANDOFF_EVENTS, "created",
+                               {"handoff_id": h.handoff_id, "action": action, "responsible_party": responsible.value,
+                                "due_at": h.due_at.isoformat(), "context": context}, now,
+                               correlation_id=context.get("case_id") or context.get("order_id")))
         return h
+
+    def _on_update(self, event: Event) -> None:
+        """The responsible party reports progress (for Corp A: through the partner gateway)."""
+        if not self.store.get(COLLECTION, event.payload.get("handoff_id") or ""):
+            return
+        by = event.payload.get("by") or "partner"
+        if event.type == "acknowledged":
+            self.acknowledge(event.payload["handoff_id"], by=by)
+        elif event.type == "completed":
+            self.acknowledge(event.payload["handoff_id"], by=by)
+            self.complete(event.payload["handoff_id"], by=by, result=event.payload.get("result"))
 
     def acknowledge(self, handoff_id: str, *, by: str) -> Handoff:
         h = self.get(handoff_id)
