@@ -1,8 +1,8 @@
 """Process entrypoint.
 
-Long-running consumer:  MCF_CLOUD=azure python -m mcf.main
-Scheduled job:          MCF_CLOUD=azure python -m mcf.main job reconciliation_daily
-Partner gateway:        MCF_CLOUD=azure python -m mcf.edge.gateway
+Long-running consumer:  MCF_CLOUD=azure python -m tower.main
+Scheduled job:          MCF_CLOUD=azure python -m tower.main job reconciliation_daily
+Partner gateway:        MCF_CLOUD=azure python -m tower.edge.gateway
 """
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import logging
 import os
 import sys
 
-from mcf.core.config import PilotConfig
-from mcf.runtime import build, from_env
+from tower.core.config import PilotConfig
+from tower.runtime import build, from_env
 
 
 def main(argv: list[str]) -> None:
@@ -20,7 +20,7 @@ def main(argv: list[str]) -> None:
     load = getattr(ports.directory, "pilot_config", None)
     system = build(ports, load() if load else PilotConfig())
 
-    from mcf.edge.connectors import CATALOG_DOC, PartnerConnectors, apply_catalog_doc, keep_catalog_fresh
+    from tower.edge.connectors import CATALOG_DOC, PartnerConnectors, apply_catalog_doc, keep_catalog_fresh
     apply_catalog_doc(system.config, ports.store.get(*CATALOG_DOC))  # the pilot item master from Corp B's feed
     if argv[:1] == ["job"]:
         system.run_job(argv[1])

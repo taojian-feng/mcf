@@ -11,14 +11,14 @@ from urllib.parse import urlparse
 import pytest
 from starlette.testclient import TestClient
 
-from mcf.adapters.http_mcf import HttpMCFTransport
-from mcf.adapters.memory import StaticDirectory, VirtualClock
-from mcf.core import topics
-from mcf.core.config import PilotConfig
-from mcf.core.ports import Event
-from mcf.edge.connectors import PartnerConnectors
-from mcf.edge.gateway import Gateway, create_app as gateway_app
-from mcf.runtime import build, memory_ports
+from tower.adapters.http_mcf import HttpMCFTransport
+from tower.adapters.memory import StaticDirectory, VirtualClock
+from tower.core import topics
+from tower.core.config import PilotConfig
+from tower.core.ports import Event
+from tower.edge.connectors import PartnerConnectors
+from tower.edge.gateway import Gateway, create_app as gateway_app
+from tower.runtime import build, memory_ports
 from sim import catalog
 from sim.common.store import MemoryStore
 from sim.common.web import sign
@@ -172,7 +172,7 @@ def test_corp_a_api_auth_and_faults():
     transport = HttpMCFTransport("https://corpa", type("S", (), {"get_secret": lambda self, n: {
         "mcf-client-id": "cid", "mcf-client-secret": "sec"}[n]})(), opener=_client_sender(http),
         clock=lambda: clock.now().timestamp())
-    from mcf.core.ports import MCFError
+    from tower.core.ports import MCFError
     with pytest.raises(MCFError) as e:
         transport.call("GetFulfillmentOrder", {"sellerFulfillmentOrderId": "nope"})
     assert e.value.code == "service_unavailable" and e.value.retryable

@@ -6,22 +6,22 @@ from datetime import timedelta
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from mcf.agents.disposition import DispositionAgent
-from mcf.agents.exception import Classifier, ExceptionAgent
-from mcf.agents.orchestration import OrchestrationAgent
-from mcf.agents.planning import PlanningAgent
-from mcf.agents.reconciliation import ReconciliationAgent
-from mcf.agents.reporting import ReportingAgent
-from mcf.core.config import PilotConfig
-from mcf.core.ports import (
+from tower.agents.disposition import DispositionAgent
+from tower.agents.exception import Classifier, ExceptionAgent
+from tower.agents.orchestration import OrchestrationAgent
+from tower.agents.planning import PlanningAgent
+from tower.agents.reconciliation import ReconciliationAgent
+from tower.agents.reporting import ReportingAgent
+from tower.core.config import PilotConfig
+from tower.core.ports import (
     LLM, AuditLedger, BlobStore, Clock, Directory, DocumentStore, MCFTransport, MessageBus, Notifier,
     SecretStore,
 )
-from mcf.services.approval import ApprovalService
-from mcf.services.audit import AuditService
-from mcf.services.governance import GovernanceService
-from mcf.services.handoffs import HandoffService
-from mcf.services.integration import IntegrationLayer
+from tower.services.approval import ApprovalService
+from tower.services.audit import AuditService
+from tower.services.governance import GovernanceService
+from tower.services.handoffs import HandoffService
+from tower.services.integration import IntegrationLayer
 
 
 @dataclass
@@ -93,7 +93,7 @@ def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] |
 
 
 def memory_ports(**overrides: Any) -> Ports:
-    from mcf.adapters import memory as m
+    from tower.adapters import memory as m
 
     clock = overrides.pop("clock", None) or m.VirtualClock()
     defaults = dict(
@@ -110,6 +110,6 @@ def from_env() -> Ports:
     if cloud == "memory":
         return memory_ports()
     if cloud == "azure":
-        from mcf.adapters.azure import azure_ports
+        from tower.adapters.azure import azure_ports
         return azure_ports()
     raise NotImplementedError(f"cloud '{cloud}' has no adapters yet (gcp and aws are planned)")

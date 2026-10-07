@@ -1,6 +1,6 @@
 """Turn config/pilot.yaml into the App Configuration keys the Directory reads.
 
-    python -m mcf.tools.people config/pilot.yaml   ->  prints {"mcf:roles": ..., "mcf:contacts": ..., ...}
+    python -m tower.tools.people config/pilot.yaml   ->  prints {"mcf:roles": ..., "mcf:contacts": ..., ...}
 
 Blank slots fall back to default_email, so one address can cover the whole pilot.
 """
@@ -10,8 +10,8 @@ import json
 import sys
 from typing import Any
 
-from mcf.core.models import ApprovalCategory, OwningParty
-from mcf.services.approval import approver_role, backup_role
+from tower.core.models import ApprovalCategory, OwningParty
+from tower.services.approval import approver_role, backup_role
 
 AGENTS_WITH_INSIGHT_ACCESS = ["planning_agent", "reporting_agent"]
 PILOT_CONTACTS = {"program_lead": "pilot_program_lead", "governance_owner": "pilot_governance_owner",

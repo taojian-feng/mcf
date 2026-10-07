@@ -5,13 +5,13 @@ import pytest
 from pydantic import BaseModel, Field
 
 from conftest import advance, order_payload, send_order, status
-from mcf.core import topics
-from mcf.core.models import (
+from tower.core import topics
+from tower.core.models import (
     ApprovalCategory, AuditKind, ConsumerOrder, ExceptionCategory, ExceptionStatus, OwningParty,
     UnhappyPathSignal,
 )
-from mcf.core.ports import Event
-from mcf.services.governance import AccessDenied, Purpose
+from tower.core.ports import Event
+from tower.services.governance import AccessDenied, Purpose
 
 
 def order_record(system, order_id="ord-1"):

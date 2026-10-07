@@ -1,6 +1,6 @@
-# MCF Agentic Fulfillment Orchestration
+# Logistics Control Tower
 
-A multi-agent system for the Corp B x Corp A Multi-Channel Fulfillment pilot. The core is cloud-agnostic, Azure is the first cloud, and GCP and AWS come later as adapter packages. The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+A multi-agent control tower for Corp A, a logistics provider that fulfills online and offline demand for retail clients. Corp B is the first client; orders reach Corp A's Multi-Channel Fulfillment (MCF) API. The direction is set out in the [design review](https://claude.ai/code/artifact/2dcfb7c4-a6a2-4bfa-9802-7bb6a2d89361). The core is cloud-agnostic, Azure is the first cloud, and GCP and AWS come later as adapter packages. The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Run it locally
 
@@ -32,7 +32,7 @@ See [docs/DEPLOY_AZURE.md](docs/DEPLOY_AZURE.md): a one-time Cloud Shell setup s
 | Azure adapters | written, not yet run against Azure | Service Bus, Cosmos, Blob, SQL ledger, Key Vault, App Configuration, ACS email, Foundry |
 | Azure infra | `infra/azure/main.bicep` compiles (incl. Container Apps Jobs for daily/weekly/quarterly work); `sql/audit.sql` | |
 
-Scheduled work runs as `python -m mcf.main job <name>` (reconciliation_daily, planning_daily, disposition_daily, metrics_daily, weekly_summary, qbr_summary).
+Scheduled work runs as `python -m tower.main job <name>` (reconciliation_daily, planning_daily, disposition_daily, metrics_daily, weekly_summary, qbr_summary).
 
 Simplifications to revisit with the pilot team: demand is modeled per UPC x region per week; replenishment sources FCs from the IXD first, then an ISC; disposition picks the cheaper of Rebound return or removal; replenishment accuracy compares recommended quantity with the next week's actual sales.
 
@@ -41,15 +41,15 @@ Not yet covered: PII retention purge job (R9.5 is set up via Cosmos TTL on `orde
 ## Layout
 
 ```
-mcf/core        models, ports (interfaces), topics, config       no cloud imports
-mcf/services    audit, approval, governance, integration, handoffs
-mcf/agents      orchestration, exception, reconciliation, planning, disposition, reporting
-mcf/adapters    memory/ (local + tests), azure/, http_mcf.py
-mcf/runtime.py  wires ports to adapters (MCF_CLOUD=memory|azure)
+tower/core        models, ports (interfaces), topics, config       no cloud imports
+tower/services    audit, approval, governance, integration, handoffs
+tower/agents      orchestration, exception, reconciliation, planning, disposition, reporting
+tower/adapters    memory/ (local + tests), azure/, http_mcf.py
+tower/runtime.py  wires ports to adapters (MCF_CLOUD=memory|azure)
 infra/azure     main.bicep, sql/audit.sql
 tests           test_slice.py (order-to-exception), test_agents.py (the other four agents)
 ```
 
 ## Adding GCP or AWS
 
-Implement the ports in `mcf/core/ports.py` under `mcf/adapters/gcp` or `mcf/adapters/aws` and add a branch in `runtime.from_env`. No agent or service code changes. The port-to-service mapping per cloud is in ARCHITECTURE.md section 3.
+Implement the ports in `tower/core/ports.py` under `tower/adapters/gcp` or `tower/adapters/aws` and add a branch in `runtime.from_env`. No agent or service code changes. The port-to-service mapping per cloud is in ARCHITECTURE.md section 3.

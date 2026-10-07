@@ -85,7 +85,7 @@ and SQL provisioning. The workflow:
 1. Deploys `infra/azure/main.bicep`, keeping whatever image is already running (a placeholder the first time).
 2. Builds the image from `Dockerfile` and pushes it to the new Container Registry.
 3. Creates the `pii-masking-key` secret in Key Vault if it is missing.
-4. Seeds App Configuration with `mcf:pilot_config` (the defaults in `mcf/core/config.py`), `mcf:roles`,
+4. Seeds App Configuration with `mcf:pilot_config` (the defaults in `tower/core/config.py`), `mcf:roles`,
    `mcf:contacts` and `mcf:pilot_authorization_list`. It never overwrites keys that already exist, so edits you
    make in the portal stick.
 5. Creates the append-only audit ledger tables and the agents' database user (`infra/azure/sql/audit.sql`),

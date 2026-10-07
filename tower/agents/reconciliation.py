@@ -7,11 +7,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from mcf.core import topics
-from mcf.core.config import PilotConfig
-from mcf.core.models import AuditKind, InventoryEvent, InventoryEventType as T, OwningParty
-from mcf.core.ports import Clock, Directory, DocumentStore, Event, MessageBus, Notifier
-from mcf.services.audit import AuditService
+from tower.core import topics
+from tower.core.config import PilotConfig
+from tower.core.models import AuditKind, InventoryEvent, InventoryEventType as T, OwningParty
+from tower.core.ports import Clock, Directory, DocumentStore, Event, MessageBus, Notifier
+from tower.services.audit import AuditService
 
 AGENT = "reconciliation_agent"
 EVENTS = "inventory_events"      # append-only event log: the source of truth and the history (R2.6)

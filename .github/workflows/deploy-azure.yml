@@ -142,12 +142,12 @@ jobs:
           }
           # Thresholds and nodes: seeded once, then edited in the portal.
           if ! az appconfig kv show --endpoint "$APPCFG_URL" --auth-mode login --key mcf:pilot_config -o none 2>/dev/null; then
-            put mcf:pilot_config "$(python -c 'from mcf.core.config import PilotConfig; print(PilotConfig().model_dump_json())')"
+            put mcf:pilot_config "$(python -c 'from tower.core.config import PilotConfig; print(PilotConfig().model_dump_json())')"
           fi
           # People: the file (or the PILOT_PEOPLE secret) is the source of truth on every deploy.
           src=config/pilot.yaml
           if [ -n "$PILOT_PEOPLE" ]; then printf '%s' "$PILOT_PEOPLE" > "$RUNNER_TEMP/pilot.yaml"; src="$RUNNER_TEMP/pilot.yaml"; fi
-          python -m mcf.tools.people "$src" > people.json
+          python -m tower.tools.people "$src" > people.json
           for key in mcf:roles mcf:contacts mcf:pilot_authorization_list; do put "$key" "$(jq -c --arg k "$key" '.[$k]' people.json)"; done
           echo "People synced from $([ -n "$PILOT_PEOPLE" ] && echo 'the PILOT_PEOPLE secret' || echo config/pilot.yaml):"
           jq -r '"  \(.["mcf:roles"] | length) people with approver roles, \(.["mcf:contacts"] | length) alert contacts filled"' people.json

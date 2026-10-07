@@ -1,6 +1,6 @@
-from mcf.core.models import ApprovalCategory, OwningParty
-from mcf.services.approval import approver_role
-from mcf.tools.people import build
+from tower.core.models import ApprovalCategory, OwningParty
+from tower.services.approval import approver_role
+from tower.tools.people import build
 
 
 def test_one_default_email_covers_every_approver_and_contact():

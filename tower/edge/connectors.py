@@ -17,11 +17,11 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable
 
-from mcf.core import topics
-from mcf.core.models import OwningParty
-from mcf.core.ports import Event, MCFTransport
+from tower.core import topics
+from tower.core.models import OwningParty
+from tower.core.ports import Event, MCFTransport
 
-log = logging.getLogger("mcf.connectors")
+log = logging.getLogger("tower.connectors")
 
 CATALOG_DOC = ("planning_meta", "catalog")
 CORPB_INBOUND_KEY = "corpb-inbound-api-key"
@@ -78,7 +78,7 @@ class PartnerConnectors:
             return
         # Retryable failures raise MCFError, so the bus redelivers; a refusal is final and the
         # handoff's own ack timer escalates it to Corp A's escalation contact.
-        from mcf.core.ports import MCFError
+        from tower.core.ports import MCFError
         try:
             self.mcf.call("CreateCase", {"caseId": p["handoff_id"], "action": p["action"], "dueAt": p.get("due_at"),
                                          "context": p.get("context") or {}})
