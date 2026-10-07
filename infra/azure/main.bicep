@@ -353,7 +353,7 @@ resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = if (enableC
 resource roleFoundry 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableClaude) {
   scope: foundry
   name: guid(foundry.id, uami.id, 'cognitive-services-user')
-  properties: { principalId: uami.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87a2f9bf6a') }
+  properties: { principalId: uami.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87135dc908') }
 }
 
 // ------------------------------------------------------------------ Container Apps
