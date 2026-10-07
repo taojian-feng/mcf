@@ -94,19 +94,39 @@ Re-run it for every change you want deployed.
 
 ## 7. After the first deploy
 
-- **Who can approve.** Edit `mcf:roles` in App Configuration (portal > the `mcfpilot-cfg-…` resource >
-  Configuration explorer), for example `{"you@example.com": ["approver:disposition:corp_b", "approver:distribution_plan:corp_b"]}`.
-  Contacts (for example `exception_operator`, `corp_b_inventory`) go in `mcf:contacts`. Also add approvers and
-  agent names to `mcf:pilot_authorization_list` so they can see Corp B insight data.
-- **Logs.** Portal > the `mcfpilot-all` Container App > Log stream, or Log Analytics with
-  `ContainerAppConsoleLogs_CL | order by TimeGenerated desc`. Notifications show up here as JSON lines until email
-  is configured.
-- **Claude.** Optional for now; the agents run without it. To turn it on, deploy Claude in Microsoft Foundry, put
-  its key in Key Vault as `foundry-api-key`, and set `MCF_FOUNDRY_RESOURCE` on the app.
-- **Email.** Optional. Create an Azure Communication Services email resource and set `MCF_ACS_ENDPOINT` and
-  `MCF_EMAIL_SENDER`.
-- **Real MCF API.** Set the app's `mcfApiMode` parameter to `live`, `MCF_API_BASE_URL`, and the Key Vault secret
-  `mcf-access-token`.
+### People: who approves and who gets alerts
+
+Everything lives in one file, [`config/pilot.yaml`](../config/pilot.yaml). To start, set `default_email` to
+your address and leave the rest blank: you then approve everything and get every alert. Fill in other slots as
+real owners are named. Lists take several emails, for example `disposition: [ann@corpb.com, raj@corpb.com]`.
+
+Edit it on GitHub (open the file, click the pencil, commit to `main`). The **Sync pilot people (dev)** workflow
+then copies it into Azure within a couple of minutes, and every full deploy does the same. Changes made by hand in
+the portal to `mcf:roles`, `mcf:contacts` or `mcf:pilot_authorization_list` are overwritten by the file.
+
+If the repository is public and you'd rather keep emails out of it, put the same YAML in a repository secret
+named `PILOT_PEOPLE`. The workflows use the secret instead of the file whenever it is set.
+
+### Email
+
+On by default. The deploy creates an Azure Communication Services email sender with a free Azure-managed
+domain (`DoNotReply@<random>.azurecomm.net`), so alerts go out as email with no setup. Anyone with no address
+in the people file is logged instead (portal > the `mcfpilot-all` Container App > Log stream). Set the Bicep
+parameter `enableEmail=false` to log only. Azure-managed domains are rate limited and land in spam more often;
+for the pilot, connect your own domain in the portal (Email Communication Services > Provision domains).
+
+### Logs
+
+Portal > the `mcfpilot-all` Container App > Log stream, or Log Analytics with
+`ContainerAppConsoleLogs_CL | order by TimeGenerated desc`.
+
+### Still off
+
+- **Claude.** The agents run on deterministic rules without it. Turning it on needs Claude deployed in
+  Microsoft Foundry on this subscription; put its key in Key Vault as `foundry-api-key` and set
+  `MCF_FOUNDRY_RESOURCE` on the app.
+- **Real MCF API.** The agents talk to a built-in sandbox until Corp A provides an endpoint. Then set the
+  `mcfApiMode` parameter to `live`, `MCF_API_BASE_URL`, and the Key Vault secret `mcf-access-token`.
 
 ## 8. Tear down
 

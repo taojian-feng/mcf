@@ -260,26 +260,37 @@ class AppConfigDirectory:
 # ---------------------------------------------------------------- Communication Services (Notifier)
 
 class AcsEmailNotifier:
+    """Email through Azure Communication Services. A recipient with no address in mcf:contacts, or a
+    failed send, is logged instead so a missing contact never breaks the agent that raised it."""
+
     def __init__(self, endpoint: str, sender: str, directory: AppConfigDirectory, credential=None):
         from azure.communication.email import EmailClient
         self._client = EmailClient(endpoint, credential or _credential())
-        self._sender, self._directory = sender, directory
+        self._sender, self._directory, self._log = sender, directory, LogNotifier()
 
     def send(self, recipient: str, subject: str, body: str, *, severity: str = "info") -> None:
-        address = recipient if "@" in recipient else (self._directory.contact(recipient) or recipient)
-        self._client.begin_send({
-            "senderAddress": self._sender,
-            "recipients": {"to": [{"address": address}]},
-            "content": {"subject": f"[MCF {severity}] {subject}", "plainText": body},
-        })
+        address = recipient if "@" in recipient else self._directory.contact(recipient)
+        if not address:
+            self._log.send(recipient, subject, body, severity=severity, note="no email address in mcf:contacts")
+            return
+        try:
+            self._client.begin_send({
+                "senderAddress": self._sender,
+                "recipients": {"to": [{"address": address}]},
+                "content": {"subject": f"[MCF {severity}] {subject}", "plainText": body},
+            })
+        except Exception as e:  # noqa: BLE001 - delivery problems are logged, not raised
+            self._log.send(address, subject, body, severity=severity, note=f"email failed: {e}")
 
 
 class LogNotifier:
     """Dev fallback: notifications go to stdout, which Container Apps ships to Log Analytics."""
 
-    def send(self, recipient: str, subject: str, body: str, *, severity: str = "info") -> None:
-        print(json.dumps({"notification": {"to": recipient, "subject": subject, "severity": severity, "body": body}}),
-              flush=True)
+    def send(self, recipient: str, subject: str, body: str, *, severity: str = "info", note: str | None = None) -> None:
+        entry = {"to": recipient, "subject": subject, "severity": severity, "body": body}
+        if note:
+            entry["note"] = note
+        print(json.dumps({"notification": entry}), flush=True)
 
 
 # ---------------------------------------------------------------- Claude on Microsoft Foundry (LLM)

@@ -104,21 +104,27 @@ jobs:
             cat err.txt; sleep 20
           done
 
-      - name: Seed App Configuration defaults (only keys that are absent)
+      - name: Seed pilot settings and sync people from config/pilot.yaml
+        env:
+          PILOT_PEOPLE: ${{ secrets.PILOT_PEOPLE }}   # optional: the same YAML, kept out of the repo
         run: |
-          pip install --quiet pydantic
-          seed() {
-            if ! az appconfig kv show --endpoint "$APPCFG_URL" --auth-mode login --key "$1" -o none 2>/dev/null; then
-              az appconfig kv set --endpoint "$APPCFG_URL" --auth-mode login --key "$1" --value "$2" \
-                --content-type application/json --yes -o none
-              echo "seeded $1"
-            fi
-          }
+          pip install --quiet pydantic pyyaml
           for i in 1 2 3 4 5 6; do az appconfig kv list --endpoint "$APPCFG_URL" --auth-mode login --top 1 -o none 2>/dev/null && break; sleep 20; done
-          seed mcf:pilot_config "$(python -c 'from mcf.core.config import PilotConfig; print(PilotConfig().model_dump_json())')"
-          seed mcf:roles '{}'
-          seed mcf:contacts '{}'
-          seed mcf:pilot_authorization_list '["planning_agent", "reporting_agent"]'
+          put() {
+            az appconfig kv set --endpoint "$APPCFG_URL" --auth-mode login --key "$1" --value "$2" \
+              --content-type application/json --yes -o none
+          }
+          # Thresholds and nodes: seeded once, then edited in the portal.
+          if ! az appconfig kv show --endpoint "$APPCFG_URL" --auth-mode login --key mcf:pilot_config -o none 2>/dev/null; then
+            put mcf:pilot_config "$(python -c 'from mcf.core.config import PilotConfig; print(PilotConfig().model_dump_json())')"
+          fi
+          # People: the file (or the PILOT_PEOPLE secret) is the source of truth on every deploy.
+          src=config/pilot.yaml
+          if [ -n "$PILOT_PEOPLE" ]; then printf '%s' "$PILOT_PEOPLE" > "$RUNNER_TEMP/pilot.yaml"; src="$RUNNER_TEMP/pilot.yaml"; fi
+          python -m mcf.tools.people "$src" > people.json
+          for key in mcf:roles mcf:contacts mcf:pilot_authorization_list; do put "$key" "$(jq -c --arg k "$key" '.[$k]' people.json)"; done
+          echo "People synced from $([ -n "$PILOT_PEOPLE" ] && echo 'the PILOT_PEOPLE secret' || echo config/pilot.yaml):"
+          jq -r '"  \(.["mcf:roles"] | length) people with approver roles, \(.["mcf:contacts"] | length) alert contacts filled"' people.json
 
       - name: Create the audit ledger tables
         run: |

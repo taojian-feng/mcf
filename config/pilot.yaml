@@ -1,0 +1,42 @@
+# Who does what in the pilot. Every deploy copies this into Azure (App Configuration).
+#
+# To start, set default_email and leave everything else blank: that one address then
+# approves everything and gets every alert. Fill in other slots as real owners are named.
+# Lists take one or more emails, e.g. [ann@corpb.com, raj@corpb.com].
+
+default_email: ""
+
+corp_b:
+  approvers:                  # who can approve each kind of Corp B decision
+    distribution_plan: []
+    replenishment: []
+    disposition: []
+    exception_resolution: []
+  backup_approvers:           # reminded when the main approver doesn't answer in time
+    exception_resolution: []
+  contacts:
+    ops: ""                   # day-to-day handoffs assigned to Corp B
+    escalation: ""            # handoffs that miss their deadline
+    data: ""                  # bad or missing data feeds
+    inventory: ""             # aging inventory alerts
+    planner: ""               # planning issues (e.g. no source inventory)
+    review: ""                # weekly and quarterly summaries
+
+corp_a:
+  approvers:
+    exception_resolution: []
+  contacts:
+    ops: ""
+    escalation: ""
+    data: ""
+    review: ""
+
+pilot:
+  program_lead: ""            # owns handoffs nobody else picked up
+  governance_owner: ""        # told when an approval has no approver
+  exception_operator: ""      # escalated order exceptions
+  fulfillment_ops: ""         # inventory mismatches
+  ops_team: ""                # system problems (failing API calls, incomplete metrics)
+
+# Extra people allowed to see Corp B insight data. Approvers are added automatically.
+can_see_insight_data: []

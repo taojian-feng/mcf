@@ -1,0 +1,43 @@
+# Applies config/pilot.yaml to the running dev environment whenever that file changes on main.
+# (A full deploy does the same; this is the quick path for people changes.)
+name: Sync pilot people (dev)
+
+on:
+  push:
+    branches: [main]
+    paths: [config/pilot.yaml]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency: { group: deploy-azure-dev, cancel-in-progress: false }
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: azure-dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sync people into App Configuration
+        env:
+          RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+          PILOT_PEOPLE: ${{ secrets.PILOT_PEOPLE }}
+        run: |
+          pip install --quiet pydantic pyyaml
+          endpoint=$(az appconfig list -g "$RG" --query '[0].endpoint' -o tsv)
+          [ -n "$endpoint" ] || { echo "::error::No App Configuration store in $RG yet. Run the Deploy to Azure (dev) workflow first."; exit 1; }
+          src=config/pilot.yaml
+          if [ -n "$PILOT_PEOPLE" ]; then printf '%s' "$PILOT_PEOPLE" > "$RUNNER_TEMP/pilot.yaml"; src="$RUNNER_TEMP/pilot.yaml"; fi
+          python -m mcf.tools.people "$src" > people.json
+          for key in mcf:roles mcf:contacts mcf:pilot_authorization_list; do
+            az appconfig kv set --endpoint "$endpoint" --auth-mode login --key "$key" \
+              --value "$(jq -c --arg k "$key" '.[$k]' people.json)" --content-type application/json --yes -o none
+          done
+          jq -r '"Synced: \(.["mcf:roles"] | length) people with approver roles, \(.["mcf:contacts"] | length) alert contacts"' people.json
