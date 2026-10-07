@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t mcf-agents:ci .
       - name: Image imports the Azure adapters
-        run: docker run --rm mcf-agents:ci python -c "import pyodbc, uvicorn, tower.adapters.azure, tower.main, tower.edge.gateway, tower.edge.console; print(pyodbc.drivers())"
+        run: docker run --rm mcf-agents:ci python -c "import pyodbc, uvicorn, tower.adapters.azure, tower.main, tower.edge.gateway, tower.edge.console, evals.exceptions; print(pyodbc.drivers())"
       - run: docker build -f sim/Dockerfile -t partner-sims:ci .
       - name: Simulators image imports both partners
         run: docker run --rm partner-sims:ci python -c "import sim.corpa.__main__, sim.corpb.__main__, azure.cosmos, azure.storage.blob"

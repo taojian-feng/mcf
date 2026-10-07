@@ -29,7 +29,7 @@ See [docs/DEPLOY_AZURE.md](docs/DEPLOY_AZURE.md): a one-time Cloud Shell setup s
 | Planning_Agent | done (forecast/sales/cold-start feeds, ATS cover, replenishment, imbalance, distribution plan) | R1.1 to R1.9 |
 | Disposition_Agent | done (aging + storage cost, recommendations, completion tracking) | R4.1 to R4.9 |
 | Reporting_Agent | done (10 metrics, 4-week baselines, CSV export, weekly + QBR summaries) | R6.1 to R6.7 |
-| Azure adapters | written, not yet run against Azure | Service Bus, Cosmos, Blob, SQL ledger, Key Vault, App Configuration, ACS email, Foundry |
+| Azure adapters | running in Azure dev | Service Bus, Cosmos, Blob, SQL ledger, Key Vault, App Configuration, ACS email, Foundry |
 | Azure infra | `infra/azure/main.bicep` compiles (incl. Container Apps Jobs for daily/weekly/quarterly work); `sql/audit.sql` | |
 
 Scheduled work runs as `python -m tower.main job <name>` (reconciliation_daily, planning_daily, disposition_daily, metrics_daily, weekly_summary, qbr_summary).

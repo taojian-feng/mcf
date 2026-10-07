@@ -260,7 +260,7 @@ class CorpA:
             days, mode = _carrier_plan(dist, budget)
             o["plan"] = {"ship_date": ship.isoformat(), "transit_days": days, "mode": mode, "miles": round(dist, 1)}
             o["eta"] = (ship + timedelta(days=days)).isoformat()
-            o["fate"] = self._fate()
+            o["fate"] = o["assigned_fate"] = self._fate()  # assigned_fate: kept for evaluations
             self._set_status(o, "ACCEPTED", now)
             ship_at = datetime.combine(ship, time(self.rng.randint(17, 22), self.rng.randint(0, 59)), timezone.utc)
             o["ship_at"] = _iso(max(ship_at, now + self._wait(hours=(2, 4))))

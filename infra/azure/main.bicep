@@ -3,7 +3,8 @@
 // Defaults are sized for a dev environment; set serviceBusSku=Premium and agentApps to one app per agent for the pilot.
 // Partners: Corp A (MCF API) and Corp B (order management, feeds) run as simulators in their own Container Apps with
 // their own identities and databases, talking to the system only over HTTPS (docs/PARTNER_APIS.md).
-// Not yet included (next iteration): private endpoints + VNet integration, APIM, Microsoft Foundry deployment, Purview.
+// Claude runs in a Microsoft Foundry resource created here; the model itself is deployed once in the Foundry portal
+// (docs/DEPLOY_AZURE.md, "Claude"). Not yet included: private endpoints + VNet integration, APIM, Purview.
 // See docs/ARCHITECTURE.md section 4.
 
 @description('Short lowercase prefix for resource names')
@@ -25,6 +26,12 @@ param corpbOrdersPerDay string = '140'
 @description('Audit database size. S0 (~$15/month) never pauses and easily takes the pilot load; GP_S_Gen5_2 is serverless, which only saves money while idle.')
 @allowed([ 'S0', 'S1', 'GP_S_Gen5_2' ])
 param sqlSku string = 'S0'
+@description('Create the Microsoft Foundry resource that hosts Claude. Needs the Microsoft.CognitiveServices provider registered.')
+param enableClaude bool = true
+@description('Region for the Foundry resource; it must be one where Foundry offers Claude (East US 2 is).')
+param claudeLocation string = location
+@description('Foundry deployment name of the Claude model (the portal defaults it to the model id).')
+param claudeDeployment string = 'claude-opus-5-5'
 @description('Object id of the principal that deploys (the GitHub Actions service principal); gets Key Vault secret write access.')
 param deployerPrincipalId string = ''
 @description('Entra ID group that administers the audit SQL database')
@@ -325,6 +332,30 @@ resource feedToBus 'Microsoft.EventGrid/systemTopics/eventSubscriptions@2023-12-
   dependsOn: [ sbTopics, roleSb ]
 }
 
+// ------------------------------------------------------------------ Microsoft Foundry (Claude)
+
+// The agents sign in with their managed identity; API keys are turned off. The Claude model is deployed into this
+// resource once, in the Foundry portal, because the first deployment asks you to accept the Azure Marketplace terms.
+resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = if (enableClaude) {
+  name: '${prefix}-ai-${suffix}'
+  location: claudeLocation
+  kind: 'AIServices'
+  sku: { name: 'S0' }
+  identity: { type: 'SystemAssigned' }
+  properties: {
+    customSubDomainName: '${prefix}-ai-${suffix}'
+    allowProjectManagement: true
+    disableLocalAuth: true
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource roleFoundry 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableClaude) {
+  scope: foundry
+  name: guid(foundry.id, uami.id, 'cognitive-services-user')
+  properties: { principalId: uami.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87a2f9bf6a') }
+}
+
 // ------------------------------------------------------------------ Container Apps
 
 var baseEnv = concat([
@@ -347,7 +378,11 @@ var baseEnv = concat([
 // partners' webhook URL would depend on themselves).
 // Approval emails link to the console; its address is fixed by its name and the environment's domain.
 var consoleUrl = 'https://${prefix}-console.${cae.properties.defaultDomain}'
-var commonEnv = concat(baseEnv, [ { name: 'MCF_CONSOLE_URL', value: consoleUrl } ], enablePartners ? [
+var claudeEnv = enableClaude ? [
+  { name: 'MCF_FOUNDRY_RESOURCE', value: foundry.name }
+  { name: 'MCF_LLM_MODEL', value: claudeDeployment }
+] : []
+var commonEnv = concat(baseEnv, [ { name: 'MCF_CONSOLE_URL', value: consoleUrl } ], claudeEnv, enablePartners ? [
   { name: 'MCF_API_MODE', value: 'live' }
   { name: 'MCF_API_BASE_URL', value: 'https://${corpaApp!.properties.configuration.ingress.fqdn}' }
   { name: 'MCF_CORPB_URL', value: 'https://${corpbApp!.properties.configuration.ingress.fqdn}' }
@@ -473,6 +508,34 @@ resource consoleApp 'Microsoft.App/containerApps@2024-03-01' = {
         env: concat(commonEnv, [ { name: 'PORT', value: '8080' } ])
       } ]
       scale: { minReplicas: 0, maxReplicas: 2 }
+    }
+  }
+  dependsOn: [ roleAcr ]
+}
+
+// Evaluation: runs the simulated world in-process for two weeks and scores rules against Claude on the same
+// exception signals. Started by hand: az containerapp job start -g <rg> -n <prefix>-eval-exceptions.
+resource evalJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
+  name: '${prefix}-eval-exceptions'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
+  properties: {
+    environmentId: cae.id
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 3600
+      replicaRetryLimit: 0
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: registries
+    }
+    template: {
+      containers: [ {
+        name: 'eval'
+        image: image
+        command: [ 'python', '-m', 'evals.exceptions', '--days', '14', '--arms', 'all' ]
+        resources: { cpu: json('1.0'), memory: '2Gi' }
+        env: commonEnv
+      } ]
     }
   }
   dependsOn: [ roleAcr ]
@@ -720,6 +783,7 @@ output sqlLocation string = sqlLocation
 output emailSender string = enableEmail ? 'DoNotReply@${emailDomain!.properties.mailFromSenderDomain}' : ''
 output agentsIdentityName string = uami.name
 output containerAppNames array = [for a in agentApps: '${prefix}-${a}']
+output foundryResource string = enableClaude ? foundry.name : ''
 output consoleUrl string = 'https://${consoleApp.properties.configuration.ingress.fqdn}'
 output gatewayUrl string = enablePartners ? 'https://${gatewayApp!.properties.configuration.ingress.fqdn}' : ''
 output corpaUrl string = enablePartners ? 'https://${corpaApp!.properties.configuration.ingress.fqdn}' : ''

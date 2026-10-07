@@ -23,15 +23,18 @@ in-process sandbox MCF API until a real one exists, and logs notifications to st
 | Azure SQL (audit ledger) | Standard S0 (partner traffic keeps it busy, so serverless would never pause) | ~$15 |
 | Cosmos DB (2 accounts) | Serverless | ~$5–15 with simulated traffic |
 | Container Registry, Key Vault, Storage, Log Analytics | Basic tiers | ~$15 |
+| Claude on Foundry (Opus 5.5, pay per token) | only ambiguous exceptions and weekly summaries | a few dollars |
 | **Total** | | **about $180** |
 
-Without the partner simulators (`enablePartners=false`) it is about $100. For production, set `serviceBusSku=Premium` (about $700) and split `agentApps` to one app per agent.
+Without the partner simulators (`enablePartners=false`) it is about $100. One full run of the exception
+evaluation with Claude (14 simulated days, all arms) costs roughly $10 to $25 in tokens; the report states the
+exact figure. For production, set `serviceBusSku=Premium` (about $700) and split `agentApps` to one app per agent.
 
 ## 3. Providers and quotas
 
 `bootstrap.sh` registers these resource providers for you: `Microsoft.App`, `ServiceBus`, `DocumentDB`, `Sql`,
 `Storage`, `KeyVault`, `AppConfiguration`, `EventGrid`, `OperationalInsights`, `Insights`, `ManagedIdentity`,
-`ContainerRegistry`, `Communication`.
+`ContainerRegistry`, `Communication`, `CognitiveServices` (for Claude on Foundry).
 
 Default quotas on a pay-as-you-go subscription cover this deployment. The ones that most often get in the way:
 
@@ -154,11 +157,31 @@ To pause the partners, scale both simulators to zero (portal > Container App > S
 for `mcfpilot-corpa-mcf`). To remove them, deploy with `enablePartners=false`. To connect a real Corp A later, point
 `MCF_API_BASE_URL` at it and put its OAuth client in `mcf-client-id` / `mcf-client-secret`.
 
-### Still off
+### Claude
 
-- **Claude.** The agents run on deterministic rules without it. Turning it on needs Claude deployed in
-  Microsoft Foundry on this subscription; put its key in Key Vault as `foundry-api-key` and set
-  `MCF_FOUNDRY_RESOURCE` on the app.
+The deploy creates a Foundry resource (`mcfpilot-ai-<suffix>`, shown in the deploy summary) and gives the agents'
+managed identity the Cognitive Services User role on it, so there is no key to copy. The model itself is deployed
+once by hand, because Azure asks a person to accept the Marketplace terms:
+
+1. If your subscription was bootstrapped before Claude was added, register the provider once in Cloud Shell:
+   `az provider register --namespace Microsoft.CognitiveServices`.
+2. Open [ai.azure.com](https://ai.azure.com), pick the `mcfpilot-ai-<suffix>` resource, then Models + endpoints >
+   Deploy model > `claude-opus-5-5`. Keep the default deployment name (`claude-opus-5-5`) and choose Global
+   Standard. Accept the terms when asked.
+3. That is all. Until the model exists, calls fail and every agent falls back to its rules, as before.
+
+To check how Claude does before relying on it, start the evaluation job:
+
+```bash
+az containerapp job start -g mcfpilot-dev-rg -n mcfpilot-eval-exceptions
+```
+
+It replays two simulated weeks of orders in memory and scores four ways of classifying each exception signal
+against what really happened: rules only, rules with Claude for ambiguous cases (what production runs), Claude
+alone, and Claude with the order's history. The report is emailed to the ops contact and kept in the `reports`
+container under `evals/`. Run it locally without Claude with `python -m evals.exceptions --days 7`.
+
+To turn Claude off, deploy with `enableClaude=false`.
 
 ## 8. Tear down
 
