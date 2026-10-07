@@ -29,7 +29,6 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: azure-dev   # must match the federated credential subject created by bootstrap.sh
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

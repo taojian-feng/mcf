@@ -17,7 +17,6 @@ concurrency: { group: deploy-azure-dev, cancel-in-progress: false }
 jobs:
   sync:
     runs-on: ubuntu-latest
-    environment: azure-dev
     steps:
       - uses: actions/checkout@v4
       - uses: azure/login@v2

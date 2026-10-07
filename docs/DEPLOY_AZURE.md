@@ -63,11 +63,14 @@ The rest of this guide uses GitHub Actions.
    curl -fsSL https://raw.githubusercontent.com/taojian-feng/mcf/main/infra/azure/bootstrap.sh | bash
    ```
 
+   If the repo is private, that link needs a sign-in: run `gh auth login` in Cloud Shell, then
+   `gh repo clone taojian-feng/mcf && OWNER_ID=166564305 REPO_NUM=1406376717 bash mcf/infra/azure/bootstrap.sh`.
+
    Options go in front as environment variables, for example
    `LOCATION=centralus RG=mcfpilot-dev-rg SUBSCRIPTION_ID=<id> bash infra/azure/bootstrap.sh`.
 
    It registers providers, creates the resource group, an Entra app that GitHub signs in as (federated with
-   `repo:taojian-feng/mcf:environment:azure-dev`, scoped to the resource group with Contributor and RBAC
+   pushes and manual runs on `main`, scoped to the resource group with Contributor and RBAC
    Administrator), and the Entra group `mcfpilot-sql-admins` that administers the audit database. It creates
    nothing billable, and it is safe to re-run.
 3. In GitHub, open the repo's **Settings > Secrets and variables > Actions** and add what the script printed:
