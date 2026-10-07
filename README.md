@@ -9,6 +9,10 @@ pip install pydantic pytest
 python -m pytest            # runs the order-to-exception slice in memory with virtual time
 ```
 
+## Deploy to Azure
+
+See [docs/DEPLOY_AZURE.md](docs/DEPLOY_AZURE.md): a one-time Cloud Shell setup script, then a manual GitHub Actions workflow.
+
 ## What exists today (v0.2)
 
 | Area | Status | Requirements covered |

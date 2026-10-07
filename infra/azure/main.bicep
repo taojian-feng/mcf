@@ -1,13 +1,24 @@
 // MCF Agentic Fulfillment Orchestration: Azure foundation (pilot scale).
-// Deploy: az deployment group create -g <rg> -f infra/azure/main.bicep -p prefix=mcfpilot sqlAdminGroupObjectId=<guid> sqlAdminGroupName=<name>
+// Deploy: see docs/DEPLOY_AZURE.md (GitHub Actions workflow .github/workflows/deploy-azure.yml).
+// Defaults are sized for a dev environment; set serviceBusSku=Premium and agentApps to one app per agent for the pilot.
 // Not yet included (next iteration): private endpoints + VNet integration, APIM, Communication Services email domain,
 // Microsoft Foundry deployment, Purview. See docs/ARCHITECTURE.md section 4.
 
 @description('Short lowercase prefix for resource names')
 param prefix string = 'mcfpilot'
 param location string = resourceGroup().location
-@description('Container image tag for the agent images (one image, agent chosen by MCF_AGENT)')
+@description('Agent image. The first deploy uses a public placeholder; the workflow then builds the real image into the registry.')
 param image string = 'mcr.microsoft.com/k8se/quickstart:latest'
+@description('Standard is enough for dev (topics, scheduled messages, duplicate detection); Premium adds isolation and private endpoints.')
+@allowed([ 'Standard', 'Premium' ])
+param serviceBusSku string = 'Standard'
+@description('Long-running consumer apps. Every app runs every agent handler as competing consumers, so one app is enough for dev.')
+param agentApps array = [ 'all' ]
+@description('sandbox: in-process fake MCF API (no Corp A endpoint yet). live: call MCF_API_BASE_URL.')
+@allowed([ 'sandbox', 'live' ])
+param mcfApiMode string = 'sandbox'
+@description('Object id of the principal that deploys (the GitHub Actions service principal); gets Key Vault secret write access.')
+param deployerPrincipalId string = ''
 @description('Entra ID group that administers the audit SQL database')
 param sqlAdminGroupObjectId string
 param sqlAdminGroupName string
@@ -46,7 +57,6 @@ var subscriptions = [
   { name: 'integration-layer', topics: [ 'feeds.arrived' ] }
 ]
 var subscriptionPairs = flatten(map(subscriptions, s => map(s.topics, t => { sub: s.name, topic: t })))
-var agents = [ 'orchestration', 'exception', 'approval', 'handoff', 'integration', 'planning', 'reconciliation', 'disposition', 'reporting' ]
 var containers = [
   { name: 'order_pii', ttl: piiRetentionDays * 86400 }
   { name: 'orders', ttl: -1 }
@@ -97,7 +107,7 @@ resource appi 'Microsoft.Insights/components@2020-02-02' = {
 resource sb 'Microsoft.ServiceBus/namespaces@2022-10-01-preview' = {
   name: '${prefix}-sb-${suffix}'
   location: location
-  sku: { name: 'Premium', tier: 'Premium', capacity: 1 }
+  sku: serviceBusSku == 'Premium' ? { name: 'Premium', tier: 'Premium', capacity: 1 } : { name: 'Standard', tier: 'Standard' }
   properties: { disableLocalAuth: true, minimumTlsVersion: '1.2' }
 }
 
@@ -243,7 +253,23 @@ resource sqlDb 'Microsoft.Sql/servers/databases@2023-08-01-preview' = {
   name: 'mcf-audit'
   location: location
   sku: { name: 'GP_S_Gen5_2', tier: 'GeneralPurpose' }
-  properties: { isLedgerOn: true } // every table is a ledger table; DDL in sql/audit.sql makes them append-only
+  properties: { isLedgerOn: true, autoPauseDelay: 60, minCapacity: json('0.5') } // every table is a ledger table; DDL in sql/audit.sql makes them append-only
+}
+
+// Container Apps reach SQL over the Azure backbone. Replace with a private endpoint for the pilot.
+resource sqlAllowAzure 'Microsoft.Sql/servers/firewallRules@2023-08-01-preview' = {
+  parent: sql
+  name: 'AllowAzureServices'
+  properties: { startIpAddress: '0.0.0.0', endIpAddress: '0.0.0.0' }
+}
+
+// ------------------------------------------------------------------ Container registry
+
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: take('${prefix}acr${suffix}', 50)
+  location: location
+  sku: { name: 'Basic' }
+  properties: { adminUserEnabled: false }
 }
 
 // ------------------------------------------------------------------ Event Grid: feed arrival -> Service Bus
@@ -268,7 +294,23 @@ resource feedToBus 'Microsoft.EventGrid/systemTopics/eventSubscriptions@2023-12-
   dependsOn: [ sbTopics, roleSb ]
 }
 
-// ------------------------------------------------------------------ Container Apps (one app per agent / service)
+// ------------------------------------------------------------------ Container Apps
+
+var commonEnv = [
+  { name: 'MCF_CLOUD', value: 'azure' }
+  { name: 'MCF_API_MODE', value: mcfApiMode }
+  { name: 'AZURE_CLIENT_ID', value: uami.properties.clientId }
+  { name: 'MCF_SERVICEBUS_NAMESPACE', value: '${sb.name}.servicebus.windows.net' }
+  { name: 'MCF_COSMOS_URL', value: cosmos.properties.documentEndpoint }
+  { name: 'MCF_COSMOS_DB', value: 'mcf' }
+  { name: 'MCF_BLOB_URL', value: storage.properties.primaryEndpoints.blob }
+  { name: 'MCF_SQL_SERVER', value: sql.properties.fullyQualifiedDomainName }
+  { name: 'MCF_SQL_DB', value: 'mcf-audit' }
+  { name: 'MCF_KEYVAULT_URL', value: kv.properties.vaultUri }
+  { name: 'MCF_APPCONFIG_URL', value: appcfg.properties.endpoint }
+  { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appi.properties.ConnectionString }
+]
+var registries = [ { server: acr.properties.loginServer, identity: uami.id } ]
 
 resource cae 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${prefix}-cae'
@@ -281,35 +323,24 @@ resource cae 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-resource apps 'Microsoft.App/containerApps@2024-03-01' = [for a in agents: {
+resource apps 'Microsoft.App/containerApps@2024-03-01' = [for a in agentApps: {
   name: '${prefix}-${a}'
   location: location
   identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
   properties: {
     managedEnvironmentId: cae.id
+    configuration: { registries: registries }
     template: {
       containers: [ {
         name: a
         image: image
         resources: { cpu: json('0.5'), memory: '1Gi' }
-        env: [
-          { name: 'MCF_CLOUD', value: 'azure' }
-          { name: 'MCF_AGENT', value: a }
-          { name: 'AZURE_CLIENT_ID', value: uami.properties.clientId }
-          { name: 'MCF_SERVICEBUS_NAMESPACE', value: '${sb.name}.servicebus.windows.net' }
-          { name: 'MCF_COSMOS_URL', value: cosmos.properties.documentEndpoint }
-          { name: 'MCF_COSMOS_DB', value: 'mcf' }
-          { name: 'MCF_BLOB_URL', value: storage.properties.primaryEndpoints.blob }
-          { name: 'MCF_SQL_SERVER', value: sql.properties.fullyQualifiedDomainName }
-          { name: 'MCF_SQL_DB', value: 'mcf-audit' }
-          { name: 'MCF_KEYVAULT_URL', value: kv.properties.vaultUri }
-          { name: 'MCF_APPCONFIG_URL', value: appcfg.properties.endpoint }
-          { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appi.properties.ConnectionString }
-        ]
+        env: concat(commonEnv, [ { name: 'MCF_AGENT', value: a } ])
       } ]
-      scale: { minReplicas: 1, maxReplicas: 5 }
+      scale: { minReplicas: 1, maxReplicas: 3 }
     }
   }
+  dependsOn: [ roleAcr ]
 }]
 
 // Scheduled agent work (daily reconciliation, planning, aging, metrics; weekly and quarterly summaries). Times are UTC.
@@ -333,6 +364,7 @@ resource scheduledJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: {
       replicaTimeout: 3600
       replicaRetryLimit: 1
       scheduleTriggerConfig: { cronExpression: j.cron, parallelism: 1, replicaCompletionCount: 1 }
+      registries: registries
     }
     template: {
       containers: [ {
@@ -340,21 +372,11 @@ resource scheduledJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: {
         image: image
         command: [ 'python', '-m', 'mcf.main', 'job', j.name ]
         resources: { cpu: json('0.5'), memory: '1Gi' }
-        env: [
-          { name: 'MCF_CLOUD', value: 'azure' }
-          { name: 'AZURE_CLIENT_ID', value: uami.properties.clientId }
-          { name: 'MCF_SERVICEBUS_NAMESPACE', value: '${sb.name}.servicebus.windows.net' }
-          { name: 'MCF_COSMOS_URL', value: cosmos.properties.documentEndpoint }
-          { name: 'MCF_COSMOS_DB', value: 'mcf' }
-          { name: 'MCF_BLOB_URL', value: storage.properties.primaryEndpoints.blob }
-          { name: 'MCF_SQL_SERVER', value: sql.properties.fullyQualifiedDomainName }
-          { name: 'MCF_SQL_DB', value: 'mcf-audit' }
-          { name: 'MCF_KEYVAULT_URL', value: kv.properties.vaultUri }
-          { name: 'MCF_APPCONFIG_URL', value: appcfg.properties.endpoint }
-        ]
+        env: commonEnv
       } ]
     }
   }
+  dependsOn: [ roleAcr ]
 }]
 
 // ------------------------------------------------------------------ RBAC for the agents' managed identity
@@ -364,6 +386,27 @@ var roles = {
   storageBlobDataContributor: 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
   keyVaultSecretsUser: '4633458b-17de-408a-b874-0445c86b69e6'
   appConfigDataReader: '516239f1-63e1-4d78-a4de-a74fb236a071'
+  acrPull: '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+  keyVaultSecretsOfficer: 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
+  appConfigDataOwner: '5ae67dd6-50cb-40e7-96ff-dc2bfa4b606b'
+}
+
+resource roleAcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: acr
+  name: guid(acr.id, uami.id, roles.acrPull)
+  properties: { principalId: uami.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull) }
+}
+
+resource roleDeployerCfg 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(deployerPrincipalId)) {
+  scope: appcfg
+  name: guid(appcfg.id, deployerPrincipalId, roles.appConfigDataOwner)
+  properties: { principalId: deployerPrincipalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.appConfigDataOwner) }
+}
+
+resource roleDeployerKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(deployerPrincipalId)) {
+  scope: kv
+  name: guid(kv.id, deployerPrincipalId, roles.keyVaultSecretsOfficer)
+  properties: { principalId: deployerPrincipalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.keyVaultSecretsOfficer) }
 }
 
 resource roleSb 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -408,4 +451,11 @@ output blobUrl string = storage.properties.primaryEndpoints.blob
 output sqlServer string = sql.properties.fullyQualifiedDomainName
 output keyVaultUrl string = kv.properties.vaultUri
 output appConfigUrl string = appcfg.properties.endpoint
+output appConfigName string = appcfg.name
 output agentsIdentityClientId string = uami.properties.clientId
+output keyVaultName string = kv.name
+output acrName string = acr.name
+output acrLoginServer string = acr.properties.loginServer
+output sqlServerName string = sql.name
+output agentsIdentityName string = uami.name
+output containerAppNames array = [for a in agentApps: '${prefix}-${a}']
