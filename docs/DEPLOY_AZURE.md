@@ -17,7 +17,7 @@ in-process sandbox MCF API until a real one exists, and logs notifications to st
 
 | Service | Sizing | Per month |
 |---|---|---|
-| Container Apps | agents app (0.5 vCPU), partner gateway and two partner simulators (0.25 vCPU each), all always on; 6 short daily jobs | ~$100 |
+| Container Apps | agents app (0.5 vCPU), partner gateway and two partner simulators (0.25 vCPU each), all always on; approval console (scales to zero); 6 short daily jobs | ~$100 |
 | App Configuration | Standard | ~$36 |
 | Service Bus | Standard | ~$10 |
 | Azure SQL (audit ledger) | Standard S0 (partner traffic keeps it busy, so serverless would never pause) | ~$15 |
@@ -123,6 +123,15 @@ for the pilot, connect your own domain in the portal (Email Communication Servic
 Portal > the `mcfpilot-all` Container App > Log stream, or Log Analytics with
 `ContainerAppConsoleLogs_CL | order by TimeGenerated desc`.
 
+### Approvals
+
+Each approval email has two links: one to the request and one to everything waiting for you. Both open the
+approval console (`mcfpilot-console`), where you read what the agent wants and why, then approve or reject with a
+reason. The links sign you in as the person the email went to and stay valid for 14 days, so don't forward them.
+The console checks your approver role from the people file and records every decision in the audit ledger.
+The console scales to zero when idle, so the first click after a quiet spell takes a few seconds. To revoke every
+link at once, change the `approval-link-key` secret in Key Vault and restart the `mcfpilot-all` app.
+
 ### Partners: Corp A and Corp B
 
 The deploy runs both partner companies as simulators, each in its own Container App with its own identity and
@@ -150,7 +159,6 @@ for `mcfpilot-corpa-mcf`). To remove them, deploy with `enablePartners=false`. T
 - **Claude.** The agents run on deterministic rules without it. Turning it on needs Claude deployed in
   Microsoft Foundry on this subscription; put its key in Key Vault as `foundry-api-key` and set
   `MCF_FOUNDRY_RESOURCE` on the app.
-- **Approving in a browser.** Approval requests arrive by email, but there is no page to approve them on yet.
 
 ## 8. Tear down
 

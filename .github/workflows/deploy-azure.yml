@@ -116,6 +116,7 @@ jobs:
           seed partner-corpa-webhook-secret "$(openssl rand -hex 32)"
           seed partner-corpb-api-key "$(openssl rand -hex 24)"
           seed corpb-inbound-api-key "$(openssl rand -hex 24)"
+          seed approval-link-key "$(openssl rand -hex 32)"   # signs the console links in approval emails
 
       - name: Deploy infrastructure and the new images
         env: { SQL_ADMIN_GROUP_ID: "${{ vars.SQL_ADMIN_GROUP_ID }}", SQL_ADMIN_GROUP_NAME: "${{ vars.SQL_ADMIN_GROUP_NAME }}", DEPLOYER_ID: "${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" }
@@ -127,6 +128,7 @@ jobs:
             echo "SQL_FQDN=$(out sqlServer)";          echo "SQL_NAME=$(out sqlServerName)"
             echo "SQL_LOCATION=$(out sqlLocation)"
             echo "UAMI_NAME=$(out agentsIdentityName)"; echo "UAMI_CLIENT_ID=$(out agentsIdentityClientId)"
+            echo "CONSOLE_URL=$(out consoleUrl)"
             echo "GATEWAY_URL=$(out gatewayUrl)";      echo "CORPA_URL=$(out corpaUrl)"; echo "CORPB_URL=$(out corpbUrl)"
           } >> "$GITHUB_ENV"
 
@@ -168,10 +170,10 @@ jobs:
           done
           exit 1
 
-      - name: Smoke test (partners answer, reconciliation job runs)
+      - name: Smoke test (console and partners answer, reconciliation job runs)
         if: ${{ inputs.smoke_test }}
         run: |
-          for url in "$GATEWAY_URL" "$CORPA_URL" "$CORPB_URL"; do
+          for url in "$CONSOLE_URL" "$GATEWAY_URL" "$CORPA_URL" "$CORPB_URL"; do
             [ -n "$url" ] || continue
             for i in $(seq 1 30); do curl -fsS "$url/healthz" && echo && break; sleep 10; done
             curl -fsS "$url/healthz" >/dev/null || { echo "::error::$url/healthz is not answering"; exit 1; }
@@ -194,8 +196,9 @@ jobs:
         if: always()
         run: |
           {
-            echo "### MCF dev deploy"
+            echo "### Control Tower dev deploy"
             echo "- Resource group: \`$RG\`"
             echo "- Images: \`${IMAGE:-not built}\`, \`${SIM_IMAGE:-not built}\`"
+            if [ -n "${CONSOLE_URL:-}" ]; then echo "- Approval console: $CONSOLE_URL (open it from the link in an approval email)"; fi
             if [ -n "${GATEWAY_URL:-}" ]; then echo "- Partner gateway: $GATEWAY_URL (Corp A MCF API: $CORPA_URL, Corp B OMS: $CORPB_URL)"; fi
           } >> "$GITHUB_STEP_SUMMARY"

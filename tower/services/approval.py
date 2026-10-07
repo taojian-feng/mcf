@@ -9,6 +9,7 @@ from tower.core.config import PilotConfig
 from tower.core.models import ApprovalCategory, ApprovalItem, ApprovalStatus, OwningParty
 from tower.core.ports import Clock, Directory, DocumentStore, Event, MessageBus, Notifier
 
+from .approval_links import ApprovalLinks
 from .audit import AuditService
 
 COLLECTION = "approvals"
@@ -29,9 +30,10 @@ class ApprovalError(Exception):
 
 class ApprovalService:
     def __init__(self, store: DocumentStore, bus: MessageBus, directory: Directory, notifier: Notifier,
-                 audit: AuditService, clock: Clock, config: PilotConfig):
+                 audit: AuditService, clock: Clock, config: PilotConfig, links: ApprovalLinks | None = None):
         self.store, self.bus, self.directory = store, bus, directory
         self.notifier, self.audit, self.clock, self.config = notifier, audit, clock, config
+        self.links = links
         bus.subscribe(topics.TIMERS, self._on_timer, subscription="approval-workflow")
 
     def get(self, approval_id: str) -> ApprovalItem:
@@ -39,6 +41,15 @@ class ApprovalService:
         if doc is None:
             raise ApprovalError(f"unknown approval {approval_id}")
         return ApprovalItem.model_validate(doc)
+
+    def can_decide(self, user: str, item: ApprovalItem) -> bool:
+        return self.directory.has_role(user, approver_role(item.category, item.owning_party))
+
+    def visible_to(self, user: str) -> list[ApprovalItem]:
+        """Items this user may decide, newest first: everything still pending plus recent decisions."""
+        items = [ApprovalItem.model_validate(d) for d in self.store.query(COLLECTION)]
+        mine = [i for i in items if self.can_decide(user, i)]
+        return sorted(mine, key=lambda i: i.created_at, reverse=True)
 
     def _save(self, item: ApprovalItem) -> None:
         self.store.put(COLLECTION, item.approval_id, item.model_dump(mode="json"))
@@ -57,8 +68,7 @@ class ApprovalService:
                             owning_party=owning_party, **_ids(content))
         if item.routed_to:
             for approver in item.routed_to:
-                self.notifier.send(approver, f"Approval needed: {category.value}",
-                                   _summary(item))
+                self.notifier.send(approver, f"Approval needed: {_title(item)}", self._email(approver, item))
         else:
             owner = self.directory.contact(GOVERNANCE_OWNER) or GOVERNANCE_OWNER
             self.notifier.send(owner, "Approval routing failed",
@@ -79,7 +89,7 @@ class ApprovalService:
     def decide(self, user: str, approval_id: str, *, approve: bool, reason: str = "") -> ApprovalItem:
         item = self.get(approval_id)
         decision = "approve" if approve else "reject"
-        if not self.directory.has_role(user, approver_role(item.category, item.owning_party)):
+        if not self.can_decide(user, item):
             self.audit.denied(user, f"approval_{decision}_denied", subject_id=approval_id,
                               rationale="user lacks approver role for category and owning party")
             raise PermissionError(f"{user} may not {decision} {approval_id}")
@@ -109,7 +119,7 @@ class ApprovalService:
         recipients = set(item.routed_to) | set(
             self.directory.principals_with_role(backup_role(item.category, item.owning_party)))
         for r in sorted(recipients):
-            self.notifier.send(r, f"Reminder: approval pending {item.approval_id}", _summary(item))
+            self.notifier.send(r, f"Reminder: approval pending: {_title(item)}", self._email(r, item))
         item.reminders_sent += 1
         self._save(item)
         self.bus.publish(
@@ -117,6 +127,23 @@ class ApprovalService:
                   correlation_id=item.approval_id),
             deliver_at=self.clock.now() + self.config.approval_reminder_interval,
         )
+
+
+    def _email(self, recipient: str, item: ApprovalItem) -> str:
+        lines = [f"The {item.originating_agent.replace('_', ' ')} asks for your approval.", "",
+                 f"What: {_title(item)}", f"Why: {item.rationale}",
+                 f"Owner: {item.owning_party.value.replace('_', ' ').title()}", f"Requested: {item.created_at:%Y-%m-%d %H:%M} UTC", ""]
+        if self.links and "@" in recipient:
+            lines += ["Approve or reject it here:", self.links.item_url(recipient, item.approval_id), "",
+                      "All approvals waiting for you:", self.links.inbox_url(recipient), "",
+                      "These links sign you in as you. Don't forward this email."]
+        else:
+            lines += ["Details:", _summary(item)]
+        return "\n".join(lines)
+
+
+def _title(item: ApprovalItem) -> str:
+    return f"{item.category.value.replace('_', ' ').capitalize()} for {item.subject_id}"
 
 
 def _ids(content: dict[str, Any]) -> dict[str, list[str]]:

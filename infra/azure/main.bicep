@@ -345,7 +345,9 @@ var baseEnv = concat([
 ] : [])
 // Agents and jobs also know where the partners are; the gateway does not need to (and must not, or the
 // partners' webhook URL would depend on themselves).
-var commonEnv = concat(baseEnv, enablePartners ? [
+// Approval emails link to the console; its address is fixed by its name and the environment's domain.
+var consoleUrl = 'https://${prefix}-console.${cae.properties.defaultDomain}'
+var commonEnv = concat(baseEnv, [ { name: 'MCF_CONSOLE_URL', value: consoleUrl } ], enablePartners ? [
   { name: 'MCF_API_MODE', value: 'live' }
   { name: 'MCF_API_BASE_URL', value: 'https://${corpaApp!.properties.configuration.ingress.fqdn}' }
   { name: 'MCF_CORPB_URL', value: 'https://${corpbApp!.properties.configuration.ingress.fqdn}' }
@@ -379,6 +381,9 @@ resource roleAcs 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enab
 }
 
 var registries = [ { server: acr.properties.loginServer, identity: uami.id } ]
+// The placeholder image serves on port 80 and has no Python; real images serve on 8080.
+var agentsPlaceholder = startsWith(image, 'mcr.microsoft.com/')
+var simPlaceholder = startsWith(simImage, 'mcr.microsoft.com/')
 
 resource cae 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${prefix}-cae'
@@ -447,11 +452,33 @@ resource scheduledJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: {
   dependsOn: [ roleAcr ]
 }]
 
-// ------------------------------------------------------------------ Partner gateway and partner simulators
+// Approval console: approvers open it from the signed link in their approval email. Scales to zero
+// when nobody is using it, so the first click after a quiet spell takes a few seconds.
+resource consoleApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: '${prefix}-console'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
+  properties: {
+    managedEnvironmentId: cae.id
+    configuration: {
+      registries: registries
+      ingress: { external: true, targetPort: agentsPlaceholder ? 80 : 8080, transport: 'auto', allowInsecure: false }
+    }
+    template: {
+      containers: [ {
+        name: 'console'
+        image: image
+        command: agentsPlaceholder ? null : [ 'python', '-m', 'tower.edge.console' ]
+        resources: { cpu: json('0.25'), memory: '0.5Gi' }
+        env: concat(commonEnv, [ { name: 'PORT', value: '8080' } ])
+      } ]
+      scale: { minReplicas: 0, maxReplicas: 2 }
+    }
+  }
+  dependsOn: [ roleAcr ]
+}
 
-// The placeholder image serves on port 80 and has no Python; real images serve on 8080.
-var agentsPlaceholder = startsWith(image, 'mcr.microsoft.com/')
-var simPlaceholder = startsWith(simImage, 'mcr.microsoft.com/')
+// ------------------------------------------------------------------ Partner gateway and partner simulators
 
 // Front door for Corp B orders and Corp A webhooks. Authenticates partners and publishes to the bus.
 resource gatewayApp 'Microsoft.App/containerApps@2024-03-01' = if (enablePartners) {
@@ -693,6 +720,7 @@ output sqlLocation string = sqlLocation
 output emailSender string = enableEmail ? 'DoNotReply@${emailDomain!.properties.mailFromSenderDomain}' : ''
 output agentsIdentityName string = uami.name
 output containerAppNames array = [for a in agentApps: '${prefix}-${a}']
+output consoleUrl string = 'https://${consoleApp.properties.configuration.ingress.fqdn}'
 output gatewayUrl string = enablePartners ? 'https://${gatewayApp!.properties.configuration.ingress.fqdn}' : ''
 output corpaUrl string = enablePartners ? 'https://${corpaApp!.properties.configuration.ingress.fqdn}' : ''
 output corpbUrl string = enablePartners ? 'https://${corpbApp!.properties.configuration.ingress.fqdn}' : ''
