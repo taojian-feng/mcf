@@ -706,6 +706,7 @@ resource roleCorpbCosmos 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignmen
 var roles = {
   serviceBusDataOwner: '090c5cfd-751d-490a-894a-3ce6f1109419'
   storageBlobDataContributor: 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+  storageBlobDataReader: '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
   keyVaultSecretsUser: '4633458b-17de-408a-b874-0445c86b69e6'
   appConfigDataReader: '516239f1-63e1-4d78-a4de-a74fb236a071'
   acrPull: '7f951dda-4ed3-4680-a7ca-43fe172d538d'
@@ -729,6 +730,13 @@ resource roleDeployerKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = i
   scope: kv
   name: guid(kv.id, deployerPrincipalId, roles.keyVaultSecretsOfficer)
   properties: { principalId: deployerPrincipalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.keyVaultSecretsOfficer) }
+}
+
+// Lets the evaluation workflow read the reports the evaluation job writes.
+resource roleDeployerBlob 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(deployerPrincipalId)) {
+  scope: storage
+  name: guid(storage.id, deployerPrincipalId, roles.storageBlobDataReader)
+  properties: { principalId: deployerPrincipalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.storageBlobDataReader) }
 }
 
 resource roleSb 'Microsoft.Authorization/roleAssignments@2022-04-01' = {

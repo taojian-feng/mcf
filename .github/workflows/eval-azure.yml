@@ -1,0 +1,53 @@
+# Runs the exception evaluation in Azure dev and shows its report on the run page.
+# Manual only: Actions > Run exception evaluation (dev) > Run workflow. Deploy first.
+name: Run exception evaluation (dev)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # GitHub OIDC token for azure/login
+  contents: read
+
+concurrency: { group: eval-azure-dev, cancel-in-progress: false }
+
+env:
+  RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+  JOB: mcfpilot-eval-exceptions
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run the evaluation job
+        run: |
+          started=$(date -u +%Y%m%dT%H%M%SZ); echo "STARTED=$started" >> "$GITHUB_ENV"
+          run=$(az containerapp job start -g "$RG" -n "$JOB" --query name -o tsv)
+          echo "started $run"
+          for i in $(seq 1 480); do
+            status=$(az containerapp job execution show -g "$RG" -n "$JOB" --job-execution-name "$run" --query properties.status -o tsv)
+            case "$status" in
+              Succeeded) echo "Succeeded"; exit 0 ;;
+              Failed|Stopped|Degraded) echo "::error::Job $run ended $status. Logs: az containerapp job logs show -g $RG -n $JOB --execution $run --container eval"; exit 1 ;;
+            esac
+            [ $((i % 6)) -eq 0 ] && echo "$status"
+            sleep 10
+          done
+          echo "::error::Job $run did not finish in 80 minutes"; exit 1
+
+      - name: Show the report
+        run: |
+          account=$(az storage account list -g "$RG" --query "[?starts_with(name, 'mcfpilotst')] | [0].name" -o tsv)
+          name=$(az storage blob list --auth-mode login --account-name "$account" -c reports --prefix evals/exceptions- \
+                   --query "sort_by([], &name)[-1].name" -o tsv)
+          [ -n "$name" ] && [[ "$name" > "evals/exceptions-$STARTED" ]] || { echo "::error::No new report in reports/evals/"; exit 1; }
+          az storage blob download --auth-mode login --account-name "$account" -c reports -n "$name" -f report.md -o none
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          cat report.md
