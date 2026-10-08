@@ -4,7 +4,8 @@ Corp B places orders and drops feed files -> our gateway -> agents -> Corp A's M
 Corp A's warehouse and carriers -> signed webhooks -> our gateway -> agents -> Corp B.
 
 With `corpc=True` a second client joins: Corp C's website and stores order from the same network.
-The evaluations leave it out so their numbers stay comparable from run to run.
+With `returns=True` some delivered web orders come back. The evaluations leave out Corp C and returns
+so their numbers stay comparable from run to run.
 
 Used by the end-to-end tests and by the evaluations, which run the same world for days at a time.
 """
@@ -86,7 +87,8 @@ class World:
 
 def build_world(*, catalog_size: int = 30, orders_per_day: int = 200, seed_a: int = 11, seed_b: int = 5,
                 llm: LLM | None = None, bad_record_rate: float = 0.05, corpc: bool = False,
-                corpc_size: int = 24, corpc_web_per_day: float = 60, seed_c: int = 7) -> World:
+                corpc_size: int = 24, corpc_web_per_day: float = 60, seed_c: int = 7,
+                returns: bool = False, return_rate: float = 0.08) -> World:
     clock = VirtualClock(START)
     categories = ("exception_resolution", "disposition", "replenishment", "distribution_plan")
     roles = {"alice@corpb": {f"approver:{c}:corp_b" for c in categories}}
@@ -127,14 +129,16 @@ def build_world(*, catalog_size: int = 30, orders_per_day: int = 200, seed_a: in
 
     corpb = CorpB(MemoryStore(), clock, gateway_url="https://gateway", api_key=SECRETS["partner-corpb-api-key"],
                   upload=upload, send=_client_sender(gw), rng=random.Random(seed_b), orders_per_day=orders_per_day,
-                  bad_record_rate=bad_record_rate, catalog_size=catalog_size)
+                  bad_record_rate=bad_record_rate, catalog_size=catalog_size,
+                  return_rate=return_rate if returns else 0.0)
     corpb_http = TestClient(corpb_app(corpb, SECRETS["corpb-inbound-api-key"])).__enter__()
     clients = {"corpb": corpb_http}
     corpc_sim = None
     if corpc:
         corpc_sim = CorpC(MemoryStore(), clock, gateway_url="https://gateway", api_key=SECRETS["partner-corpc-api-key"],
                           upload=upload, send=_client_sender(gw), rng=random.Random(seed_c),
-                          web_orders_per_day=corpc_web_per_day, catalog_size=corpc_size)
+                          web_orders_per_day=corpc_web_per_day, catalog_size=corpc_size,
+                          return_rate=return_rate if returns else 0.0)
         clients["corpc"] = TestClient(corpc_app(corpc_sim, SECRETS["corpc-inbound-api-key"])).__enter__()
 
     def post(url, headers, body):  # each client's endpoint, by host

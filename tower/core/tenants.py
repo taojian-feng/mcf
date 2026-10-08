@@ -36,6 +36,8 @@ class Tenant(BaseModel):
     # stock its web orders need for this many days, the store gets less (whole cases) and is told so.
     online_protect_days: float = 7.0
     store_lead_days: int = 2                   # a store's delivery window can't end sooner than this
+    return_window_days: int = 30               # consumers may return within this many days of delivery (0: none)
+    return_ship_by_days: int = 14              # a return label is good for this many days
 
     @model_validator(mode="after")
     def _defaults(self) -> "Tenant":

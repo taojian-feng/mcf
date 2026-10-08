@@ -12,6 +12,7 @@ from tower.agents.orchestration import OrchestrationAgent
 from tower.agents.planning import PlanningAgent
 from tower.agents.reconciliation import ReconciliationAgent
 from tower.agents.reporting import ReportingAgent
+from tower.agents.returns import ReturnsAgent
 from tower.core.config import PilotConfig
 from tower.core.ports import (
     LLM, AuditLedger, BlobStore, Clock, Directory, DocumentStore, MCFTransport, MessageBus, Notifier,
@@ -63,6 +64,7 @@ class System:
     planning: PlanningAgent
     disposition: DispositionAgent
     reporting: ReportingAgent
+    returns: ReturnsAgent
 
     def run_job(self, name: str) -> object:
         """Scheduled jobs (Container Apps Jobs on Azure)."""
@@ -98,8 +100,9 @@ def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] |
                                    ports.notifier, ports.directory, ports.clock, config)
     reporting = ReportingAgent(ports.store, ports.bus, ports.blobs, planning, governance, audit, ports.notifier,
                                ports.directory, ports.clock, config, llm=ports.llm)
+    returns = ReturnsAgent(ports.store, ports.bus, integration, audit, ports.clock, config)
     return System(ports, config, audit, governance, integration, approvals, handoffs, orchestration, exceptions,
-                  reconciliation, planning, disposition, reporting)
+                  reconciliation, planning, disposition, reporting, returns)
 
 
 def memory_ports(**overrides: Any) -> Ports:

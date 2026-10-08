@@ -37,6 +37,14 @@ FATES = (("delay", 0.04), ("attempt", 0.015), ("lost", 0.004), ("undeliverable",
 FREIGHT_FATES = (("delay", 0.06),)            # LTL: a missed dock appointment is the common failure
 LTL_CARRIERS = ("Estes", "XPO", "Old Dominion", "Saia")
 CASES_PER_PALLET = 30
+RETURN_SHIP_BY_DAYS = 14
+RETURN_NO_SHOW = 0.12                          # consumers who never send the parcel back
+# What the returns bench finds, per unit, by the reason the consumer gave.
+RETURN_GRADES = {
+    "damaged_in_transit": (("DAMAGED", 0.78), ("SELLABLE", 0.18), ("WRONG_ITEM", 0.01), ("MISSING", 0.03)),
+    "defective": (("DEFECTIVE", 0.84), ("SELLABLE", 0.13), ("WRONG_ITEM", 0.01), ("MISSING", 0.02)),
+}
+RETURN_GRADES_DEFAULT = (("SELLABLE", 0.9), ("DAMAGED", 0.06), ("WRONG_ITEM", 0.025), ("MISSING", 0.015))
 
 
 def _iso(t: datetime) -> str:
@@ -229,6 +237,67 @@ class CorpA:
                         "accepted": len(accepted), "rejected": rejected[:50], "created_at": _iso(self.clock.now())})
         return 200, {"feedDocumentId": doc_id, "accepted": len(accepted), "rejected": rejected[:50]}
 
+    def create_return(self, req: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """A return authorization (RMA) for units of a delivered order, with a prepaid label to the region's FC."""
+        sfo, rid = req.get("sellerFulfillmentOrderId"), req.get("sellerReturnId")
+        items = req.get("items") or []
+        if not sfo or not rid or not items:
+            return 400, _err("InvalidInput", "sellerFulfillmentOrderId, sellerReturnId and items are required")
+        with self.lock:
+            existing = self.store.get(f"return:{rid}")
+            if existing:
+                if existing["request"]["items"] != items:
+                    return 409, _err("Conflict", f"return {rid} already exists with different items")
+                return 200, existing["response"]
+            o = self.store.get(f"order:{sfo}")
+            if not o:
+                return 404, _err("NotFound", f"order {sfo} not found")
+            if o["status"] != "DELIVERED" or o.get("b2b"):
+                return 400, _err("InvalidInput", f"order {sfo} is {o['status']}; only delivered parcels are returned")
+            shipped = {}
+            for ln in o["lines"]:
+                shipped[ln["sku"]] = shipped.get(ln["sku"], 0) + ln["qty"]
+            for it in items:
+                left = shipped.get(it.get("sellerSku"), 0) - o.get("returned", {}).get(it.get("sellerSku"), 0)
+                if not isinstance(it.get("quantity"), int) or not 0 < it["quantity"] <= left:
+                    return 400, _err("InvalidInput", f"{it.get('sellerSku')}: {left} units left to return")
+            now = self.clock.now()
+            o["returned"] = {**o.get("returned", {})}
+            for it in items:
+                o["returned"][it["sellerSku"]] = o["returned"].get(it["sellerSku"], 0) + it["quantity"]
+            self.store.put(o)
+            node = geo.REGION_FC[o["region"]]
+            carrier = self.rng.choice(["UPS", "USPS"])
+            rma = f"RMA{uuid.uuid4().hex[:10].upper()}"
+            response = {"rmaId": rma, "sellerReturnId": rid, "returnToNode": node,
+                        "label": {"carrier": carrier, "trackingNumber": f"RT{uuid.uuid4().hex[:14].upper()}"},
+                        "shipBy": (now.date() + timedelta(days=RETURN_SHIP_BY_DAYS)).isoformat()}
+            ships = self.rng.random() >= RETURN_NO_SHOW
+            self.store.put({
+                "id": f"return:{rid}", "doc_type": "return", "rma_id": rma, "return_id": rid, "sfo_id": sfo,
+                "request": req, "response": response, "node": node, "status": "AUTHORIZED", "created_at": _iso(now),
+                "step": "pickup" if ships else None,
+                "next_at": _iso(now + self._wait(days=(0.3, 6))) if ships else None,
+                # the consumer's parcel: each unit is what it is before anyone opens the box
+                "contents": [{"sellerSku": it["sellerSku"], "grade": self._fate(
+                    RETURN_GRADES.get(it.get("returnReasonCode"), RETURN_GRADES_DEFAULT), default="SELLABLE")}
+                    for it in items for _ in range(it["quantity"])],
+            })
+        return 202, response
+
+    def set_return_disposition(self, rma: str, req: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """What to do with graded units that cannot go back to stock: liquidate, back to the vendor, or hold."""
+        r = next(iter(self.store.query("return", rma_id=rma)), None)
+        if not r or r["status"] != "RECEIVED":
+            return 404, _err("NotFound", f"no received return {rma}")
+        allowed = {"liquidate", "return_to_vendor", "hold_for_client"}
+        bad = [it for it in req.get("items") or [] if it.get("disposition") not in allowed]
+        if bad or not req.get("items"):
+            return 400, _err("InvalidInput", f"disposition must be one of {sorted(allowed)}")
+        r["dispositions"] = req["items"]
+        self.store.put(r)
+        return 200, {"rmaId": rma, "status": "ACCEPTED", "items": len(req["items"])}
+
     def create_case(self, req: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         case_id, action = req.get("caseId"), req.get("action")
         if not case_id or not action:
@@ -258,6 +327,8 @@ class CorpA:
                 self._advance_transfer(t, now)
             for c in self.store.query("case", due_by=due)[:limit]:
                 self._advance_case(c, now)
+            for r in self.store.query("return", due_by=due)[:limit]:
+                self._advance_return(r, now)
         self.flush_outbox()
 
     # ---------------------------------------------------------------- orders
@@ -407,13 +478,54 @@ class CorpA:
             self._send_tracking(o, p, "SHIPPED", now)
         o["step"], o["next_at"] = "deliver", _iso(max(appt, now + timedelta(hours=12)))
 
-    def _fate(self, fates=FATES) -> str:
+    # ---------------------------------------------------------------- consumer returns
+
+    def _advance_return(self, r: dict[str, Any], now: datetime) -> None:
+        o = self.store.get(f"order:{r['sfo_id']}")
+        if r["step"] == "pickup":
+            r["status"] = "IN_TRANSIT"
+            self._return_status(r, "IN_TRANSIT", now, "Dropped off with the carrier")
+            miles = geo.miles(geo.NODES[r["node"]], tuple(o["dest"])) if o else 800
+            r["step"], r["next_at"] = "arrive", _iso(now + timedelta(days=geo.ground_days(miles))
+                                                     + self._wait(hours=(2, 20)))
+        elif r["step"] == "arrive":
+            r["status"] = "DELIVERED"
+            self._return_status(r, "DELIVERED", now, f"Delivered to {r['node']} returns")
+            r["step"], r["next_at"] = "inspect", _iso(now + self._wait(hours=(6, 40)))
+        elif r["step"] == "inspect":
+            graded: dict[tuple[str, str], int] = {}
+            for unit in r["contents"]:
+                if unit["grade"] != "MISSING":
+                    key = (unit["sellerSku"], unit["grade"])
+                    graded[key] = graded.get(key, 0) + 1
+            sellable = [(sku, n) for (sku, g), n in graded.items() if g == "SELLABLE"]
+            for sku, n in sellable:
+                self._adjust(sku, r["node"], n)
+            if sellable:
+                self._inventory_events([self._inv_event("receipt", sku, r["node"], n, now, reference=r["rma_id"])
+                                        for sku, n in sellable])
+            r["status"], r["received_at"] = "RECEIVED", _iso(now)
+            self._notify("RETURN_RECEIVED", {
+                "rmaId": r["rma_id"], "sellerReturnId": r["return_id"], "sellerFulfillmentOrderId": r["sfo_id"],
+                "nodeId": r["node"], "receivedAt": _iso(now),
+                "items": [{"sellerSku": sku, "grade": g, "quantity": n} for (sku, g), n in sorted(graded.items())]})
+            r["step"], r["next_at"] = None, None
+        self.store.put(r)
+
+    def _return_status(self, r: dict[str, Any], status: str, now: datetime, description: str) -> None:
+        label = r["response"]["label"]
+        self._notify("RETURN_STATUS", {"rmaId": r["rma_id"], "sellerReturnId": r["return_id"],
+                                       "sellerFulfillmentOrderId": r["sfo_id"], "status": status,
+                                       "carrier": label["carrier"], "trackingNumber": label["trackingNumber"],
+                                       "eventTime": _iso(now), "description": description})
+
+    def _fate(self, fates=FATES, default: str = "normal") -> str:
         r = self.rng.random()
         for fate, p in fates:
             if r < p:
                 return fate
             r -= p
-        return "normal"
+        return default
 
     def _allocate(self, o: dict[str, Any]) -> bool:
         home = geo.REGION_FC[o["region"]]

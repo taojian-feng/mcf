@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from sim import catalog, geo
+from sim.common.returns import ReturnDesk
 from sim.common.store import SimStore
 from sim.common.web import Sender, post_json, urllib_sender
 
@@ -51,6 +52,7 @@ class CorpB:
                  upload: Callable[[str, bytes], None], send: Sender = urllib_sender,
                  rng: random.Random | None = None, orders_per_day: float = 140, speed: float = 1.0,
                  bad_record_rate: float = 0.02, catalog_seed: int = 2026, catalog_size: int = catalog.PILOT_SIZE,
+                 return_rate: float = 0.08,
                  go_live_delay: timedelta = timedelta(minutes=15), forecast_delay: timedelta = timedelta(hours=1)):
         self.store, self.clock, self.gateway_url, self.api_key = store, clock, gateway_url.rstrip("/"), api_key
         self.upload, self.send, self.rng = upload, send, rng or random.Random()
@@ -60,6 +62,8 @@ class CorpB:
         self.non_pilot = catalog.non_pilot_upcs()
         self._city_weights = [c[5] for c in geo.CITIES]
         self._item_weights = {r: [it.weekly_units[r] for it in self.items] for r in catalog.REGIONS}
+        self.returns = ReturnDesk(store, self.rng, gateway_url=gateway_url, api_key=api_key, send=send,
+                                  rate=return_rate, prefix="R")
 
     # ---------------------------------------------------------------- the loop
 
@@ -76,6 +80,7 @@ class CorpB:
         meta["last_at"] = _iso(now)
         self.store.put(meta)
         self.flush_orders()
+        self.returns.flush(now)
 
     def place_order(self, now: datetime) -> dict[str, Any]:
         city, state, zipc, *_ = self.rng.choices(geo.CITIES, weights=self._city_weights)[0]
@@ -137,6 +142,8 @@ class CorpB:
             return
         self.store.put({"id": f"evt:{event_id}", "doc_type": "inbound_event", "channel": channel,
                         "type": body.get("type"), "received_at": _iso(now), "body": body})
+        if self.returns.receive(body.get("type"), body.get("payload") or {}, now):
+            return
         order_id = (body.get("payload") or {}).get("order_id")
         doc = self.store.get(f"order:{order_id}") if order_id else None
         if doc:
@@ -144,7 +151,9 @@ class CorpB:
             if body.get("type") == "order_rejected":
                 doc["status"] = "rejected"
             elif body.get("type") == "tracking_update":
-                doc["status"] = f"tracking:{(body['payload'].get('status') or '').lower()}"
+                was, doc["status"] = doc["status"], f"tracking:{(body['payload'].get('status') or '').lower()}"
+                if doc["status"] == "tracking:delivered" and was != doc["status"]:
+                    self.returns.on_delivered(doc, now)
             self.store.put(doc)
 
     # ---------------------------------------------------------------- planning files
