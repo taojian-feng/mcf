@@ -49,18 +49,43 @@ SYSTEM_PROMPT = (
 )
 
 
+# What an investigator reads about the order: its own history, no consumer data.
+ORDER_EVIDENCE = ("order_id", "placed_at", "promised_by", "delivery_promise_days", "state", "transitions",
+                  "projected_delivery", "missing_projection_checks", "tracking", "delivered_on")
+
+INVESTIGATE_PROMPT = SYSTEM_PROMPT + (
+    " You also get the order's record as our system saw it when the signal arrived: its lifecycle states with "
+    "times, the promised delivery date, the latest projected delivery date, and carrier tracking events. Use "
+    "that evidence. If the order looks healthy and the signal is a false alarm, return category null."
+)
+
+
+def order_evidence(order: dict | None) -> dict | None:
+    return {k: order.get(k) for k in ORDER_EVIDENCE} if order else None
+
+
 class Classifier:
+    """Rules first; with Claude, investigate. Given the order's record, Claude weighs the signal against the
+    order's history (a failed delivery attempt and a late parcel both raise a promise breach, and only the
+    tracking tells them apart). Without the record, Claude only sees signals the rules find ambiguous."""
+
     def __init__(self, llm: LLM | None = None):
         self.llm = llm
 
-    def classify(self, sig: UnhappyPathSignal) -> Classification:
+    def classify(self, sig: UnhappyPathSignal, order: dict | None = None) -> Classification:
         prior = RULES.get(sig.signal_type, {})
+        if self.llm is not None and order is not None:
+            prompt = {"signal": sig.model_dump(mode="json"), "order_record": order}
+            out = self.llm.structured(system=INVESTIGATE_PROMPT, prompt=json.dumps(prompt, default=str),
+                                      schema=Classification)
+            if out is not None:
+                return out
         if prior and max(prior.values()) >= 0.9:
             cat, conf = max(prior.items(), key=lambda kv: kv[1])
             return Classification(category=cat, confidence=conf,
                                   candidates={k.value: v for k, v in prior.items()},
                                   rationale=f"rule: signal type '{sig.signal_type}'")
-        if self.llm is not None:
+        if self.llm is not None and order is None:
             out = self.llm.structured(system=SYSTEM_PROMPT, prompt=json.dumps(sig.model_dump(mode="json")),
                                       schema=Classification)
             if out is not None:
@@ -139,7 +164,11 @@ class ExceptionAgent:
         if self.store.query(CASES, signal_id=sig.signal_id):
             return  # duplicate delivery
         case = ExceptionCase(signal=sig, opened_at=self.clock.now())
-        case.classification = self.classifier.classify(sig)
+        order = order_evidence(self.store.get("orders", sig.order_id)) if sig.order_id else None
+        if order is not None:
+            case.history.append({"at": self.clock.now().isoformat(), "event": "order_record_read",
+                                 "state": order.get("state"), "tracking_events": len(order.get("tracking") or [])})
+        case.classification = self.classifier.classify(sig, order)
         cls = case.classification
         self._log(case, "classified", category=cls.category.value if cls.category else None,
                   confidence=cls.confidence)

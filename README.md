@@ -24,7 +24,7 @@ See [docs/DEPLOY_AZURE.md](docs/DEPLOY_AZURE.md): a one-time Cloud Shell setup s
 | Integration_Layer | done (MCF calls, retry, feed validation) | R7.1 to R7.7 |
 | Handoff tracker | done | R11.1 to R11.8 |
 | Orchestration_Agent | done | R5.1 to R5.10 |
-| Exception_Agent | done (rules classifier + Claude on Foundry hook, 6 playbooks) | R3.1 to R3.10 |
+| Exception_Agent | done (investigates the order record with Claude, rules fallback, 6 playbooks) | R3.1 to R3.10 |
 | Reconciliation_Agent | done (event-sourced inventory, FIFO lots, point-in-time replay) | R2.1 to R2.8 |
 | Planning_Agent | done (forecast/sales/cold-start feeds, ATS cover, replenishment, imbalance, distribution plan) | R1.1 to R1.9 |
 | Disposition_Agent | done (aging + storage cost, recommendations, completion tracking) | R4.1 to R4.9 |
