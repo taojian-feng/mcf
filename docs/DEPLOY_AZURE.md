@@ -143,6 +143,12 @@ Portal > the `mcfpilot-all` Container App > Log stream, or Log Analytics with
 
 ### Approvals
 
+Approval emails come from `DoNotReply@<random>.azurecomm.net` with a subject like
+`[Control Tower info] Approval needed: ...`, to `default_email` unless `config/pilot.yaml` names someone else.
+If nothing arrives, run the GitHub Actions workflow **Check email (dev)**. It sends one test email the way the
+agents do, shows Azure's answer, and lists what the agents tried to email in the last two days and whether
+each send worked.
+
 Each approval email has two links: one to the request and one to everything waiting for you. Both open the
 approval console (`mcfpilot-console`), where you read what the agent wants and why, then approve or reject with a
 reason. The links sign you in as the person the email went to and stay valid for 14 days, so don't forward them.
@@ -226,7 +232,7 @@ container under `evals/`. Run it locally without Claude with `python -m evals.ex
 The copilot evaluation (`mcfpilot-eval-copilot`) runs 16 simulated days with Corp B, Corp C and returns, then
 asks the copilot 11 questions as a Corp B, a Corp C and a Corp A person. Each answer is checked against the
 records (a count, an order's state, a stock total), and two questions check the limits: another client's order
-stays hidden, and asking it to approve changes nothing. Expect a dollar or two in tokens; the report states the
+stays hidden, and asking it to approve changes nothing. The first run cost about $0.27 in tokens; the report states the
 exact cost. See the questions without Claude with `python -m evals.copilot --dry-run`.
 
 To turn Claude off, deploy with `enableClaude=false`.
