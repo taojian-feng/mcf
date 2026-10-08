@@ -1,0 +1,46 @@
+# Runs one read-only Log Analytics (KQL) query against the dev environment's logs and shows the result on the
+# run page. For looking into problems without the Azure portal. Manual only: Actions > Query logs (dev).
+name: Query logs (dev)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kql:
+        description: KQL query (e.g. ContainerAppConsoleLogs_CL | where TimeGenerated > ago(1h) | take 20)
+        type: string
+        required: true
+
+permissions:
+  id-token: write   # GitHub OIDC token for azure/login
+  contents: read
+
+env:
+  RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Run the query
+        env:
+          KQL: ${{ inputs.kql }}
+        run: |
+          set -o pipefail
+          az config set extension.use_dynamic_install=yes_without_prompt extension.dynamic_install_allow_preview=true -o none
+          ws=$(az resource list -g "$RG" --resource-type Microsoft.OperationalInsights/workspaces --query '[0].name' -o tsv)
+          wsid=$(az monitor log-analytics workspace show -g "$RG" -n "$ws" --query customerId -o tsv)
+          az monitor log-analytics query -w "$wsid" --analytics-query "$KQL" -o json > result.json
+          {
+            echo '### Query'; echo '```'; printf '%s\n' "$KQL"; echo '```'
+            echo "### Result ($(jq length result.json) rows)"
+            jq -r 'if length == 0 then "(no rows)" else
+                     ((.[0] | keys_unsorted | map(select(. != "TableName"))) as $k
+                      | ("| " + ($k | join(" | ")) + " |"), ("|" + ($k | map("---") | join("|")) + "|"),
+                        (.[] | [.[$k[]] | tostring | gsub("\\|"; "/") | gsub("\n"; " ") | .[0:300]] | "| " + join(" | ") + " |"))
+                   end' result.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
