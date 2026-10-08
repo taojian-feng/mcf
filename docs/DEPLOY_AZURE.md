@@ -184,7 +184,8 @@ meantime use the same model straight from Anthropic:
 
 When `anthropic-api-key` is present it is used; delete the secret to go back to Foundry once quota arrives.
 
-To check how Claude does before relying on it, start the evaluation job:
+To check how Claude does before relying on it, run the GitHub Actions workflow **Run exception evaluation (dev)**,
+which starts the job, waits for it and shows the report on the run page. Or start the job yourself:
 
 ```bash
 az containerapp job start -g mcfpilot-dev-rg -n mcfpilot-eval-exceptions
