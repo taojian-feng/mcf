@@ -301,6 +301,13 @@ class ApprovalCategory(str, Enum):
     REPLENISHMENT = "replenishment"
     DISPOSITION = "disposition"
     EXCEPTION_RESOLUTION = "exception_resolution"
+    CLIENT_ONBOARDING = "client_onboarding"    # Corp A: take on a new retail client
+    INVOICE = "invoice"                        # Corp A: send a client its monthly invoice
+
+
+# Decisions only Corp A makes; a client's people never hold these roles.
+PROVIDER_CATEGORIES = frozenset({ApprovalCategory.CLIENT_ONBOARDING, ApprovalCategory.INVOICE})
+CLIENT_CATEGORIES = tuple(c for c in ApprovalCategory if c not in PROVIDER_CATEGORIES)
 
 
 class ApprovalStatus(str, Enum):

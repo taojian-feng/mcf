@@ -75,8 +75,11 @@ class CorpA:
         self._load_listings()
 
     def _load_listings(self) -> None:
-        doc = self.store.get("meta:listings")
-        self.items = {u: self.catalog[u] for u in (doc or {}).get("upcs", []) if u in self.catalog}
+        doc = self.store.get("meta:listings") or {}
+        for upc, d in (doc.get("generic") or {}).items():     # items of clients the sim has no catalog for
+            if upc not in self.catalog:
+                self.catalog[upc] = _generic_item(upc, d)
+        self.items = {u: self.catalog[u] for u in doc.get("upcs", []) if u in self.catalog}
 
     # ================================================================ API operations
 
@@ -226,11 +229,24 @@ class CorpA:
         doc_id = f"feed-{uuid.uuid4().hex[:12]}"
         accepted, rejected = [], []
         if req.get("contentType") == "LISTINGS":
+            generic = {}
             for it in req.get("items") or []:
-                (accepted if it.get("sellerSku") in self.catalog else rejected).append(it.get("sellerSku"))
+                upc = it.get("sellerSku")
+                if upc in self.catalog:
+                    accepted.append(upc)
+                elif isinstance(upc, str) and len(upc) == 12 and upc.isdigit():
+                    # A client new to the sim (onboarded through the tower): list it as a generic item.
+                    generic[upc] = {"title": str(it.get("title") or f"Item {upc}")[:80],
+                                    "unit_cost": _num(it.get("unitCost"), 15.0),
+                                    "weight_lb": _num(it.get("weightLb"), 2.0)}
+                    accepted.append(upc)
+                else:
+                    rejected.append(upc)
             with self.lock:
                 doc = self.store.get("meta:listings") or {"id": "meta:listings", "doc_type": "meta", "upcs": []}
                 doc["upcs"] = sorted(set(doc["upcs"]) | set(accepted))
+                if generic:
+                    doc["generic"] = {**(doc.get("generic") or {}), **generic}
                 self.store.put(doc)
                 self._load_listings()
         self.store.put({"id": f"feed:{doc_id}", "doc_type": "feed", "content_type": req.get("contentType"),
@@ -840,6 +856,17 @@ class CorpA:
         lo, hi = minutes or hours or days
         unit = 60 if minutes else 3600 if hours else 86400
         return timedelta(seconds=self.rng.uniform(lo, hi) * unit / self.speed)
+
+
+def _num(v: Any, default: float) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else default
+
+
+def _generic_item(upc: str, d: dict[str, Any]) -> catalog.Item:
+    """An item the sim knows only from its listing: slow and steady demand, so it gets a little stock."""
+    return catalog.Item(upc=upc, title=d.get("title") or f"Item {upc}", category="General",
+                        unit_cost=float(d.get("unit_cost") or 15.0), weight_lb=float(d.get("weight_lb") or 2.0),
+                        weekly_units={r: 2.0 for r in catalog.REGIONS})
 
 
 def _other_fc(node: str) -> str:

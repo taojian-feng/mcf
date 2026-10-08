@@ -448,13 +448,17 @@ def azure_ports():
 
     env = os.environ
     cred = _credential()
+    from tower.services.clients import ClientDirectory
+
     secrets = KeyVaultSecrets(env["MCF_KEYVAULT_URL"], cred)
-    directory = AppConfigDirectory(env["MCF_APPCONFIG_URL"], cred)
+    store = CosmosStore(env["MCF_COSMOS_URL"], env.get("MCF_COSMOS_DB", "mcf"), cred)
+    # pilot.yaml's people and clients, plus the clients onboarded through the tower
+    directory = ClientDirectory(AppConfigDirectory(env["MCF_APPCONFIG_URL"], cred), store)
     llm = _claude(env, secrets, cred)
     return Ports(
         clock=SystemClock(),
         bus=ServiceBusBus(env["MCF_SERVICEBUS_NAMESPACE"], cred),
-        store=CosmosStore(env["MCF_COSMOS_URL"], env.get("MCF_COSMOS_DB", "mcf"), cred),
+        store=store,
         blobs=AzureBlobStore(env["MCF_BLOB_URL"], cred),
         ledger=SqlLedger(env["MCF_SQL_SERVER"], env["MCF_SQL_DB"], cred),
         directory=directory,
@@ -465,4 +469,5 @@ def azure_ports():
         masking_key=secrets.get_secret("pii-masking-key").encode(),
         secrets=secrets,
         console_url=env.get("MCF_CONSOLE_URL") or None,
+        gateway_url=env.get("MCF_GATEWAY_URL") or None,
     )

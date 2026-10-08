@@ -1,4 +1,4 @@
-from tower.core.models import ApprovalCategory, OwningParty
+from tower.core.models import CLIENT_CATEGORIES, PROVIDER_CATEGORIES, ApprovalCategory, OwningParty
 from tower.services.approval import approver_role
 from tower.tools.people import build
 
@@ -6,7 +6,11 @@ from tower.tools.people import build
 def test_one_default_email_covers_every_approver_and_contact():
     out = build({"default_email": "me@x.com"})
     roles = set(out["mcf:roles"]["me@x.com"])
-    assert {approver_role(c, p) for c in ApprovalCategory for p in OwningParty} <= roles
+    assert {approver_role(c, p) for c in CLIENT_CATEGORIES for p in OwningParty} <= roles
+    # Taking on clients and invoicing them are Corp A's decisions only.
+    assert {approver_role(c, OwningParty.CORP_A) for c in PROVIDER_CATEGORIES} <= roles
+    assert not {approver_role(c, OwningParty.CORP_B) for c in PROVIDER_CATEGORIES} & roles
+    assert out["mcf:contacts"]["corp_b_billing"] == "me@x.com"
     assert out["mcf:contacts"]["exception_operator"] == "me@x.com"
     assert out["mcf:contacts"]["corp_b_inventory"] == "me@x.com"
     assert out["mcf:contacts"]["ops-team"] == "me@x.com"

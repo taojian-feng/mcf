@@ -6,8 +6,10 @@ from datetime import timedelta
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from tower.agents.billing import BillingAgent
 from tower.agents.disposition import DispositionAgent
 from tower.agents.exception import Classifier, ExceptionAgent
+from tower.agents.onboarding import OnboardingAgent
 from tower.agents.orchestration import OrchestrationAgent
 from tower.agents.planning import PlanningAgent
 from tower.agents.reconciliation import ReconciliationAgent
@@ -21,6 +23,7 @@ from tower.core.ports import (
 from tower.services.approval import ApprovalService
 from tower.services.audit import AuditService
 from tower.services.briefs import BriefWriter
+from tower.services.clients import ClientDirectory
 from tower.services.governance import GovernanceService
 from tower.services.handoffs import HandoffService
 from tower.services.integration import IntegrationLayer
@@ -40,6 +43,7 @@ class Ports:
     masking_key: bytes
     secrets: SecretStore | None = None
     console_url: str | None = None      # where approvers open the approval console
+    gateway_url: str | None = None      # where clients send catalogs and orders (for welcome emails)
 
 
 def approval_links(ports: Ports):
@@ -66,6 +70,8 @@ class System:
     disposition: DispositionAgent
     reporting: ReportingAgent
     returns: ReturnsAgent
+    onboarding: OnboardingAgent
+    billing: BillingAgent
 
     def run_job(self, name: str) -> object:
         """Scheduled jobs (Container Apps Jobs on Azure)."""
@@ -76,11 +82,16 @@ class System:
             "metrics_daily": self.reporting.compute_daily,
             "weekly_summary": lambda: self.reporting.run_weekly(self.ports.clock.now().date() - timedelta(days=1)),
             "qbr_summary": lambda: self.reporting.run_quarterly(self.ports.clock.now().date() - timedelta(days=1)),
+            "onboarding_daily": self.onboarding.run_daily,
+            "billing_daily": self.billing.run_daily,
+            "invoicing_monthly": self.billing.run_monthly,
         }
         return jobs[name]()
 
 
 def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] | None = None) -> System:
+    if not isinstance(ports.directory, ClientDirectory):     # clients onboarded through the tower, too
+        ports.directory = ClientDirectory(ports.directory, ports.store)
     audit = AuditService(ports.ledger, ports.blobs, ports.notifier, ports.clock)
     governance = GovernanceService(ports.directory, audit, ports.clock, masking_key=ports.masking_key,
                                    cache_ttl_s=config.authorization_list_cache_ttl.total_seconds())
@@ -103,8 +114,12 @@ def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] |
     reporting = ReportingAgent(ports.store, ports.bus, ports.blobs, planning, governance, audit, ports.notifier,
                                ports.directory, ports.clock, config, llm=ports.llm)
     returns = ReturnsAgent(ports.store, ports.bus, integration, audit, ports.clock, config)
+    onboarding = OnboardingAgent(ports.store, ports.bus, approvals, audit, ports.notifier, ports.directory,
+                                 ports.clock, config, gateway_url=ports.gateway_url)
+    billing = BillingAgent(ports.store, ports.bus, ports.blobs, approvals, audit, ports.notifier, ports.directory,
+                           ports.clock, config)
     return System(ports, config, audit, governance, integration, approvals, handoffs, orchestration, exceptions,
-                  reconciliation, planning, disposition, reporting, returns)
+                  reconciliation, planning, disposition, reporting, returns, onboarding, billing)
 
 
 def memory_ports(**overrides: Any) -> Ports:

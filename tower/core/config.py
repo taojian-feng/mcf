@@ -142,7 +142,30 @@ class PilotConfig(BaseModel):
     anomaly_threshold: float = 0.20            # relative deviation from trailing 4-week mean
     baseline_days: int = 28
 
+    # Step 8: onboarding new clients
+    provider_promise_days: list[int] = Field(default_factory=lambda: [2, 3, 4, 5])  # promises Corp A's network can keep
+    network_capacity_orders_per_day: int = 1500  # what Corp A's nodes can pick and ship in a day, all clients
+    capacity_warning_share: float = 0.8          # warn when a new client takes the network past this share
+    onboarding_nudge_after: timedelta = timedelta(days=7)  # remind a new client that hasn't sent its catalog
+
+    # Step 8: billing. The standard rate card (USD); a client's contract can override any rate.
+    default_rates: dict[str, float] = Field(default_factory=lambda: {
+        "pick_pack_order": 3.10,       # per order picked and packed
+        "pick_pack_extra_unit": 0.65,  # per unit after the first in an order
+        "shipping_markup": 0.08,       # on Corp A's parcel carrier cost
+        "freight_markup": 0.05,        # on Corp A's freight (LTL) cost
+        "storage_unit_month": 0.40,    # per unit on hand, charged daily
+        "return_processing": 3.50,     # per consumer return received and graded
+        "monthly_minimum": 750.00,     # an invoice is at least this much
+    })
+    rate_floor_share: float = 0.5                # a negotiated rate below half the standard one is refused
+    invoice_change_flag: float = 0.5             # flag a charge type that moved this much against last month
+
     # Tenants
+
+    def rates_for(self, tenant_id: str | None) -> dict[str, float]:
+        t = self.tenant(tenant_id)
+        return {**self.default_rates, **(t.rates if t else {})}
 
     def tenant(self, tenant_id: str | None) -> Tenant | None:
         return self.tenants.get(tenant_id or TENANT_ONE)

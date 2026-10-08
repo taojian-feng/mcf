@@ -2,7 +2,7 @@
 
 "Why is order 1001 late?", "What is waiting on Corp A?", "How many returns were held this week?" Claude
 answers by calling read-only tools over the tower's own records (orders, exceptions, handoffs, approvals,
-stock, returns, the audit ledger) and says where each fact came from.
+stock, returns, charges and invoices, the audit ledger) and says where each fact came from.
 
 Each person sees only their own clients. Approver roles decide that: anyone with an approver role for a
 client sees that client; Corp A's people see every client. Every tool filters by that scope, so a question
@@ -12,7 +12,7 @@ writes, and it points to the approval page for decisions. Every question is in t
 from __future__ import annotations
 
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
@@ -72,6 +72,9 @@ TOOLS = [
                  "optional": True},
           held_only={"type": "boolean", "description": "only returns with units held for review",
                      "optional": True}),
+    _tool("billing", "What each client has been charged this month (or a given month) by charge type, and "
+                     "its latest invoices with their status.",
+          month={"type": "string", "description": "YYYY-MM, default this month", "optional": True}),
     _tool("audit_trail", "What the agents and people did, from the audit ledger, newest first. Give an order "
                          "number or a SKU.",
           order_id={"type": "string", "optional": True}, sku={"type": "string", "optional": True},
@@ -234,6 +237,20 @@ class Copilot:
             "refund_units": sum(o.get("refund_units", 0) for o in r.get("outcome") or []),
             "held_units": sum(o.get("held_units", 0) for o in r.get("outcome") or []),
             "holds": [h["why"] for o in r.get("outcome") or [] for h in o.get("holds", [])]} for r in rows[:MAX_ROWS]]}
+
+    def _t_billing(self, scope: set[str], month: str | None = None) -> dict[str, Any]:
+        month = month or f"{self.clock.now():%Y-%m}"
+        out = []
+        for t in sorted(scope):
+            by_kind: dict[str, float] = defaultdict(float)
+            for c in self.store.query("charges", tenant_id=t, month=month):
+                by_kind[c["kind"]] += c["amount"]
+            invoices = sorted(self.store.query("invoices", tenant_id=t), key=lambda i: i["month"], reverse=True)[:3]
+            out.append({"client": t, "month": month, "charged_usd": round(sum(by_kind.values()), 2),
+                        "by_charge_usd": {k: round(v, 2) for k, v in sorted(by_kind.items())},
+                        "invoices": [{"invoice": i["invoice_id"], "month": i["month"], "total_usd": i["total"],
+                                      "status": i["status"]} for i in invoices]})
+        return {"clients": out}
 
     def _t_audit_trail(self, scope: set[str], order_id: str | None = None, sku: str | None = None,
                        days: int = 14) -> dict[str, Any]:
