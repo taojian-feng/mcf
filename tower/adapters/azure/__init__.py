@@ -172,6 +172,9 @@ class AzureBlobStore:
     def read(self, container: str, path: str) -> bytes:
         return self._svc.get_blob_client(container, path).download_blob().readall()
 
+    def list(self, container: str, prefix: str) -> list[str]:
+        return [b.name for b in self._svc.get_container_client(container).list_blobs(name_starts_with=prefix)]
+
 
 # ---------------------------------------------------------------- Azure SQL ledger (AuditLedger)
 

@@ -60,6 +60,8 @@ class BlobStore(Protocol):
 
     def read(self, container: str, path: str) -> bytes: ...
 
+    def list(self, container: str, prefix: str) -> list[str]: ...
+
 
 class AuditLedger(Protocol):
     """Append-only. Implementations must make update/delete impossible for agents and users."""
