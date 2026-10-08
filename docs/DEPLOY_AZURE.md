@@ -128,6 +128,29 @@ Corp B is the first client. To add another (for example a simulated retailer):
 3. Commit to `main`. The **Sync pilot people (dev)** workflow copies the client into Azure, and the gateway accepts
    its orders within about five minutes. Its orders show up at Corp A as `RETAILERTWO-<order id>`.
 
+### Taking on a client from the console
+
+A client can also be taken on without touching the repo (roadmap step 8). The person needs Corp A's
+`approver:client_onboarding:corp_a` role (with one `default_email`, that is you).
+
+1. Open the approval console from any approval email and click **Clients**, then **Take on a new client**.
+2. Fill in the form: name, channels, promise days, expected orders a day, the client's approver and ops emails,
+   and any negotiated rates (one per line, like `pick_pack_order=2.9`). Submit.
+3. The tower checks it. If something blocks it, the page says what. Otherwise an approval email arrives; approve it.
+4. The client's page now shows its API key and webhook key. Share them with the client over a secure channel.
+   The client gets a welcome email saying where to send its catalog (`POST /v1/catalog`) and orders.
+5. The tower emails you when the catalog arrives and the first order goes through, and reminds the client weekly
+   if its catalog is late.
+
+### Invoices
+
+Corp A bills every client monthly. Charges add up daily (job `billing_daily`, 05:00 UTC); on the 1st
+(`invoicing_monthly`, 11:00 UTC) each client's invoice for last month arrives as an approval for whoever has
+`approver:invoice:corp_a`. Approved invoices are saved in the `reports` storage container under `invoices/` and
+emailed to the client's billing contact (`<client>_billing`, which falls back to `default_email`). The rate card is
+`default_rates` in `tower/core/config.py`. "Ask the tower" answers questions like "what has Corp C been charged
+this month?".
+
 ### Email
 
 On by default. The deploy creates an Azure Communication Services email sender with a free Azure-managed

@@ -65,6 +65,13 @@ AFTER = {
     ApprovalCategory.DISPOSITION: (
         "Corp A carries out the {option} of {qty} units.",
         "The stock stays where it is and aging monitoring resumes."),
+    ApprovalCategory.CLIENT_ONBOARDING: (
+        "{client} is set up at once: its contract goes into the client registry, its keys are issued and "
+        "its ops contact gets a welcome email.",
+        "{client} is not set up, and whoever submitted the application is told why."),
+    ApprovalCategory.INVOICE: (
+        "The invoice is filed and emailed to {client}'s billing contact.",
+        "The invoice is held with your reason; nothing goes to {client}."),
 }
 
 
@@ -123,7 +130,8 @@ class BriefWriter:
         c, cat = item.content, item.category
         fill = {"steps": ", ".join(s.replace("_", " ") for s in c.get("steps", [])) or "none listed",
                 "qty": c.get("qty"), "upc": c.get("upc"), "source": c.get("source"), "target": c.get("target"),
-                "moves": len(c.get("moves", [])), "option": str(c.get("option", "disposition")).replace("_", " ")}
+                "moves": len(c.get("moves", [])), "option": str(c.get("option", "disposition")).replace("_", " "),
+                "client": c.get("client") or "the client"}
         approved, rejected = AFTER.get(cat, ("The agent carries out the request.", "Nothing happens."))
         numbers: list[dict[str, str]] = []
         order = context.get("order")
@@ -132,7 +140,9 @@ class BriefWriter:
                         {"label": "Order state", "value": str(order.get("state"))},
                         {"label": "Promised by", "value": str(order.get("promised_by"))}]
         for label, key in (("Units", "qty"), ("Value", "value"), ("Disposition cost", "estimated_disposition_cost"),
-                           ("Storage cost avoided", "estimated_avoided_storage_cost")):
+                           ("Storage cost avoided", "estimated_avoided_storage_cost"),
+                           ("Orders a day", "expected_orders_per_day"), ("Network load after", "network_load_after"),
+                           ("Invoice total", "total"), ("Last month", "previous_total")):
             if c.get(key) is not None:
                 numbers.append({"label": label, "value": str(c[key])})
         hist = context.get("recent_decisions") or {}
@@ -141,4 +151,5 @@ class BriefWriter:
                             "value": f"{hist['approved']} approved, {hist['rejected']} rejected"})
         return {"summary": f"{cat.value.replace('_', ' ').capitalize()} for {item.subject_id}: {item.rationale}",
                 "if_approved": approved.format(**fill), "if_rejected": rejected.format(**fill),
-                "key_numbers": numbers[:5], "check_first": [], "suggestion": None, "suggestion_reason": ""}
+                "key_numbers": numbers[:5], "check_first": list(c.get("warnings") or c.get("flags") or [])[:3],
+                "suggestion": None, "suggestion_reason": ""}

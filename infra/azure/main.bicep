@@ -82,6 +82,8 @@ var subscriptions = [
   { name: 'integration-layer', topics: [ 'feeds.arrived' ] }
   { name: 'corpa-connector', topics: [ 'handoffs.events' ] }
   { name: 'returns-agent', topics: [ 'returns.events', 'timers' ] }
+  { name: 'onboarding-agent', topics: [ 'approvals.decisions' ] }
+  { name: 'billing-agent', topics: [ 'approvals.decisions' ] }
 ]
 var subscriptionPairs = flatten(map(subscriptions, s => map(s.topics, t => { sub: s.name, topic: t })))
 var containers = [
@@ -108,6 +110,9 @@ var containers = [
   { name: 'metrics_daily', ttl: -1 }
   { name: 'summaries', ttl: -1 }
   { name: 'shipment_facts', ttl: -1 }
+  { name: 'clients', ttl: -1 }
+  { name: 'charges', ttl: -1 }
+  { name: 'invoices', ttl: -1 }
 ]
 
 // ------------------------------------------------------------------ identity + observability
@@ -383,11 +388,16 @@ var baseEnv = concat([
 // partners' webhook URL would depend on themselves).
 // Approval emails link to the console; its address is fixed by its name and the environment's domain.
 var consoleUrl = 'https://${prefix}-console.${cae.properties.defaultDomain}'
+// The onboarding agent's welcome email tells a new client where to send its catalog and orders.
+var gatewayUrl = 'https://${prefix}-gateway.${cae.properties.defaultDomain}'
 var claudeEnv = enableClaude ? [
   { name: 'MCF_FOUNDRY_RESOURCE', value: foundry.name }
   { name: 'MCF_LLM_MODEL', value: claudeDeployment }
 ] : []
-var commonEnv = concat(baseEnv, [ { name: 'MCF_CONSOLE_URL', value: consoleUrl } ], claudeEnv, enablePartners ? [
+var commonEnv = concat(baseEnv, [
+  { name: 'MCF_CONSOLE_URL', value: consoleUrl }
+  { name: 'MCF_GATEWAY_URL', value: gatewayUrl }
+], claudeEnv, enablePartners ? [
   { name: 'MCF_API_MODE', value: 'live' }
   { name: 'MCF_API_BASE_URL', value: 'https://${corpaApp!.properties.configuration.ingress.fqdn}' }
   { name: 'MCF_CORPB_URL', value: 'https://${corpbApp!.properties.configuration.ingress.fqdn}' }
@@ -457,7 +467,8 @@ resource apps 'Microsoft.App/containerApps@2024-03-01' = [for a in agentApps: {
   dependsOn: [ roleAcr ]
 }]
 
-// Scheduled agent work (daily reconciliation, planning, aging, metrics; weekly and quarterly summaries). Times are UTC.
+// Scheduled agent work (daily reconciliation, planning, aging, metrics, charges and onboarding follow-up; weekly,
+// monthly and quarterly reports and invoices). Times are UTC.
 var jobs = [
   { name: 'reconciliation_daily', cron: '0 6 * * *' }
   { name: 'planning_daily', cron: '0 7 * * *' }
@@ -465,6 +476,9 @@ var jobs = [
   { name: 'metrics_daily', cron: '0 8 * * *' }
   { name: 'weekly_summary', cron: '0 9 * * 1' }
   { name: 'qbr_summary', cron: '0 10 1 1,4,7,10 *' }
+  { name: 'billing_daily', cron: '0 5 * * *' }
+  { name: 'invoicing_monthly', cron: '0 11 1 * *' }
+  { name: 'onboarding_daily', cron: '0 13 * * *' }
 ]
 
 resource scheduledJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: {

@@ -38,6 +38,11 @@ class Tenant(BaseModel):
     store_lead_days: int = 2                   # a store's delivery window can't end sooner than this
     return_window_days: int = 30               # consumers may return within this many days of delivery (0: none)
     return_ship_by_days: int = 14              # a return label is good for this many days
+    # Clients onboarded through the tower get keys derived from one master secret (services/client_keys.py)
+    # instead of Key Vault secrets of their own; key_version rotates them.
+    keys: str = "vault"                        # vault | issued
+    key_version: int = 1
+    rates: dict[str, float] = Field(default_factory=dict)  # billing rates that differ from the standard card
 
     @model_validator(mode="after")
     def _defaults(self) -> "Tenant":

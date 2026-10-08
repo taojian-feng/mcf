@@ -5,6 +5,10 @@
   POST /approvals/{id}                  the decision (form: t, decision=approve|reject, reason)
   GET  /ask?t=<link token>              the operator copilot: ask a question about your clients' work
   POST /ask                             the question (form: t, q); the answer comes back on the page
+  GET  /clients?t=<link token>          Corp A's onboarding approvers: clients taken on through the tower
+  GET  /clients/new?t=<link token>      the application form for a new client
+  POST /clients                         submit it; the onboarding agent checks it and asks for approval
+  GET  /clients/{id}?t=<link token>     one client: checks, status, and once approved its keys
 
 Approvers arrive from the signed link in their approval email (services/approval_links.py). The link
 says who they are; ApprovalService.decide checks their approver role and writes the audit ledger, so
@@ -20,7 +24,7 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from html import escape
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, quote
 
 from starlette.applications import Starlette
@@ -29,9 +33,13 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from pydantic import ValidationError
+
 from tower.core.models import ApprovalItem, ApprovalStatus
 from tower.services.approval import ApprovalError, ApprovalService, owner_label
 from tower.services.approval_links import ApprovalLinks
+from tower.services.client_keys import api_key, webhook_key
+from tower.services.clients import ClientApplication, ClientRecord
 
 log = logging.getLogger("tower.console")
 
@@ -48,9 +56,15 @@ QUESTIONS_PER_HOUR = 30   # per person; each question is a few Claude calls
 
 
 class Console:
-    def __init__(self, approvals: ApprovalService, links: ApprovalLinks, copilot=None):
+    def __init__(self, approvals: ApprovalService, links: ApprovalLinks, copilot=None, onboarding=None,
+                 key_master: Callable[[], str] | None = None):
         self.approvals, self.links, self.copilot = approvals, links, copilot
+        self.onboarding, self.key_master = onboarding, key_master
         self._asked: dict[str, deque] = defaultdict(deque)
+
+    def can_onboard(self, user: str) -> bool:
+        from tower.agents.onboarding import is_onboarding_approver
+        return self.onboarding is not None and is_onboarding_approver(self.approvals.directory, user)
 
     def user(self, token: str) -> str | None:
         return self.links.verify(token) if token else None
@@ -60,7 +74,8 @@ class Console:
         pending = [i for i in items if i.status == ApprovalStatus.PENDING]
         decided = [i for i in items if i.status != ApprovalStatus.PENDING][:20]
         body = [f"<h1>Approvals</h1><p class=muted>Signed in as {escape(user)}"
-                + (f" · <a href='/ask?t={quote(token)}'>Ask the tower</a>" if self.copilot else "") + "</p>"]
+                + (f" · <a href='/ask?t={quote(token)}'>Ask the tower</a>" if self.copilot else "")
+                + (f" · <a href='/clients?t={quote(token)}'>Clients</a>" if self.can_onboard(user) else "") + "</p>"]
         body.append(f"<h2>Waiting for you ({len(pending)})</h2>")
         body.append(_rows(pending, token) if pending else "<p class=muted>Nothing is waiting. You're all caught up.</p>")
         if decided:
@@ -128,6 +143,119 @@ class Console:
             raise ApprovalError(f"That's {QUESTIONS_PER_HOUR} questions this hour. Try again a little later.")
         q.append(now)
         return self.copilot.ask(user, question)
+
+    # ---------------------------------------------------------------- clients (Corp A's onboarding approvers)
+
+    def clients_page(self, token: str) -> str:
+        recs = self.onboarding.all()
+        out = [f"<p><a href='/approvals?t={quote(token)}'>&larr; Approvals</a></p><h1>Clients</h1>",
+               "<p class=muted>Clients taken on through the tower. Clients set up in config/pilot.yaml "
+               "(Corp B, Corp C) aren't listed.</p>",
+               f"<p><a href='/clients/new?t={quote(token)}'>Take on a new client</a></p>"]
+        if recs:
+            rows = "".join(f"<tr><td><a href='/clients/{quote(r.tenant_id)}?t={quote(token)}'>{escape(r.name)}</a></td>"
+                           f"<td>{escape(r.status.replace('_', ' '))}</td><td>{_when(r.submitted_at)}</td>"
+                           f"<td>{escape(r.submitted_by)}</td></tr>" for r in recs)
+            out.append(f"<table><tr><th>Client</th><th>Status</th><th>Applied</th><th>By</th></tr>{rows}</table>")
+        else:
+            out.append("<p class=muted>None yet.</p>")
+        return _page("Clients", "".join(out))
+
+    def new_client_page(self, token: str, form: dict[str, Any] | None = None, error: str = "") -> str:
+        f = form or {}
+        v = lambda k, d="": escape(str(f.get(k, d)), quote=True)  # noqa: E731
+        checked = lambda k, val, default: "checked" if (val in f.get(k, [])) or (not f and default) else ""  # noqa: E731
+        out = [f"<p><a href='/clients?t={quote(token)}'>&larr; Clients</a></p><h1>Take on a new client</h1>",
+               "<p class=muted>The onboarding agent checks the application against Corp A's network, then asks "
+               "Corp A's onboarding approver to approve it. Nothing is set up until someone approves.</p>"]
+        if error:
+            out.append(f"<p class=err>{escape(error)}</p>")
+        field = lambda label, name, kind="text", extra="": (  # noqa: E731
+            f"<label for={name}>{label}</label><input id={name} name={name} type={kind} value='{v(name)}' {extra}>")
+        out.append(f"<form method=post action='/clients'><input type=hidden name=t value='{escape(token, quote=True)}'>"
+                   + field("Client name", "name", extra="required maxlength=60")
+                   + field("Client id (blank: from the name)", "tenant_id", extra="pattern='[a-z][a-z0-9_]{1,30}'")
+                   + "<label>Channels</label><p>"
+                   + f"<label class=inline><input type=checkbox name=channels value=online {checked('channels', 'online', True)}> Web orders</label> "
+                   + f"<label class=inline><input type=checkbox name=channels value=store {checked('channels', 'store', False)}> Store orders</label></p>"
+                   + "<label>Delivery promises (days)</label><p>"
+                   + "".join(f"<label class=inline><input type=checkbox name=promise_days value={d} "
+                             f"{checked('promise_days', str(d), d == 3)}> {d}</label> " for d in (2, 3, 4, 5)) + "</p>"
+                   + field("Delivery states (blank: the US 48 and DC; or e.g. CA, OR, WA)", "delivery_states")
+                   + field("Return window in days (0: no returns)", "return_window_days", "number", "min=0 max=365 value=30")
+                   + field("Expected orders a day", "expected_orders_per_day", "number", "required min=1")
+                   + field("Number of items (SKUs)", "expected_skus", "number", "min=1")
+                   + field("Client's update endpoint (https)", "outbound_url", "url")
+                   + field("Client's approver email", "approver_email", "email", "required")
+                   + field("Client's ops email", "ops_email", "email", "required")
+                   + field("Client's billing email (blank: ops)", "billing_email", "email")
+                   + "<label for=rates>Negotiated rates, one per line (blank: standard card), e.g. pick_pack_order=2.90</label>"
+                   + f"<textarea id=rates name=rates rows=3>{v('rates')}</textarea>"
+                   + f"<label for=notes>Notes for the approver</label><textarea id=notes name=notes rows=3>{v('notes')}</textarea>"
+                   + "<div class=actions><button class=primary>Check and send for approval</button></div></form>")
+        return _page("New client", "".join(out))
+
+    def submit_client(self, user: str, form: dict[str, list[str]]) -> ClientRecord:
+        one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+        rates = {}
+        for line in one("rates").splitlines():
+            if "=" in line:
+                k, _, val = line.partition("=")
+                try:
+                    rates[k.strip()] = float(val)
+                except ValueError:
+                    raise ApprovalError(f"rate {k.strip()} must be a number") from None
+        states = [x for x in one("delivery_states").replace(",", " ").split() if x]
+        try:
+            app = ClientApplication(
+                name=one("name"), tenant_id=one("tenant_id") or None, channels=form.get("channels") or [],
+                promise_days=[int(d) for d in form.get("promise_days") or []], delivery_states=states or None,
+                return_window_days=int(one("return_window_days") or 30),
+                expected_orders_per_day=int(one("expected_orders_per_day") or 0),
+                expected_skus=int(one("expected_skus") or 100), outbound_url=one("outbound_url") or None,
+                approver_email=one("approver_email"), ops_email=one("ops_email"),
+                billing_email=one("billing_email") or None, rates=rates, notes=one("notes"))
+        except (ValidationError, ValueError) as e:
+            errors = e.errors() if isinstance(e, ValidationError) else [{"loc": ("form",), "msg": str(e)}]
+            raise ApprovalError("; ".join(f"{'.'.join(map(str, x['loc']))}: {x['msg']}" for x in errors)) from None
+        return self.onboarding.apply(app, user)
+
+    def client_page(self, token: str, rec: ClientRecord, notice: str = "") -> str:
+        a = rec.application
+        out = [f"<p><a href='/clients?t={quote(token)}'>&larr; Clients</a></p><h1>{escape(rec.name)}</h1>",
+               f"<p><span class=badge>{escape(rec.status.replace('_', ' '))}</span></p>"]
+        if notice:
+            out.append(f"<p class=ok>{escape(notice)}</p>")
+        if rec.blockers:
+            out.append("<h2>Can't go ahead</h2><ul>" + "".join(f"<li class=err>{escape(b)}</li>" for b in rec.blockers)
+                       + "</ul><p class=muted>Fix these and apply again.</p>")
+        if rec.warnings:
+            out.append("<h2>For the approver to weigh</h2><ul>" + "".join(f"<li>{escape(w)}</li>" for w in rec.warnings) + "</ul>")
+        if rec.approval_id:
+            out.append(f"<p><a href='/approvals/{quote(rec.approval_id)}?t={quote(token)}'>The approval request</a>"
+                       + (f" · decided by {escape(rec.decided_by)}" if rec.decided_by else "") + "</p>")
+        if rec.decision_reason:
+            out.append(f"<p class=muted>Reason: {escape(rec.decision_reason)}</p>")
+        out.append("<h2>Application</h2>" + _content({
+            "client id": rec.tenant_id, "channels": a.channels, "promise days": a.promise_days,
+            "delivery states": a.delivery_states or "US 48 and DC", "return window days": a.return_window_days,
+            "expected orders a day": a.expected_orders_per_day, "items": a.expected_skus,
+            "network load after": f"{rec.load.get('after_share', 0):.0%} of {rec.load.get('capacity')} orders a day",
+            "update endpoint": a.outbound_url or "none", "approver": a.approver_email, "ops": a.ops_email,
+            "billing": a.billing_email or a.ops_email, "negotiated rates": a.rates or "standard card",
+            "submitted": f"{_when(rec.submitted_at)} by {rec.submitted_by}"}))
+        tenant = rec.tenant()
+        if tenant is not None and self.key_master is not None:
+            master = self.key_master()
+            out.append("<h2>Keys</h2><p class=muted>Share these with the client over a secure channel, never by "
+                       "email. The client sends the API key in X-Api-Key; we send the webhook key to its "
+                       "endpoint so it knows the call is from us.</p>"
+                       + _content({"API key": api_key(master, tenant), "webhook key": webhook_key(master, tenant),
+                                   "order prefix": tenant.order_prefix}))
+            out.append("<h2>Go-live</h2>" + _content({
+                "set up": _when(rec.activated_at), "catalog received": _when(rec.catalog_at) or "not yet",
+                "first order": _when(rec.first_order_at) or "not yet"}))
+        return _page(rec.name, "".join(out))
 
     def decide(self, user: str, approval_id: str, decision: str, reason: str) -> str:
         if decision not in ("approve", "reject"):
@@ -202,6 +330,57 @@ def create_app(console: Console) -> Starlette:
             return html(console.ask_page(user, token, question, error=str(e)), 429)
         return html(console.ask_page(user, token, question, answer))
 
+    def onboarder(token: str) -> str | None:
+        user = console.user(token)
+        return user if user and console.can_onboard(user) else None
+
+    def not_allowed() -> HTMLResponse:
+        return html(_page("Not allowed", "<h1>Only Corp A's onboarding approvers can see clients</h1>"), 403)
+
+    async def clients(request: Request) -> Response:
+        if request.method == "GET":
+            token = request.query_params.get("t", "")
+            if not console.user(token):
+                return signed_out()
+            if not await run_in_threadpool(onboarder, token):
+                return not_allowed()
+            return html(await run_in_threadpool(console.clients_page, token))
+        form = parse_qs((await request.body()).decode(errors="replace"), keep_blank_values=True)
+        token = (form.get("t") or [""])[0]
+        if not console.user(token):
+            return signed_out()
+        user = await run_in_threadpool(onboarder, token)
+        if not user:
+            return not_allowed()
+        try:
+            rec = await run_in_threadpool(console.submit_client, user, form)
+        except ApprovalError as e:
+            flat = {k: (v if k in ("channels", "promise_days") else v[0]) for k, v in form.items()}
+            return html(console.new_client_page(token, flat, str(e)), 422)
+        if rec.status == "blocked":
+            return html(console.client_page(token, rec), 422)
+        return RedirectResponse(f"/clients/{quote(rec.tenant_id)}?t={quote(token)}&done=1", 303, headers=HEADERS)
+
+    async def new_client(request: Request) -> Response:
+        token = request.query_params.get("t", "")
+        if not console.user(token):
+            return signed_out()
+        if not await run_in_threadpool(onboarder, token):
+            return not_allowed()
+        return html(console.new_client_page(token))
+
+    async def client(request: Request) -> Response:
+        token = request.query_params.get("t", "")
+        if not console.user(token):
+            return signed_out()
+        if not await run_in_threadpool(onboarder, token):
+            return not_allowed()
+        rec = await run_in_threadpool(console.onboarding.get, request.path_params["tenant_id"])
+        if rec is None:
+            return html(_page("Not found", "<h1>No such client</h1>"), 404)
+        notice = "Checked and sent for approval." if request.query_params.get("done") else ""
+        return html(await run_in_threadpool(console.client_page, token, rec, notice))
+
     async def home(request: Request) -> Response:
         return html(_page("Approvals", "<h1>Control Tower approvals</h1>"
                           "<p>Open the link in your approval email to see what's waiting for you.</p>"))
@@ -214,6 +393,9 @@ def create_app(console: Console) -> Starlette:
         Route("/approvals/{approval_id}", detail, methods=["GET"]),
         Route("/approvals/{approval_id}", decide, methods=["POST"]),
         Route("/ask", ask, methods=["GET", "POST"]),
+        Route("/clients", clients, methods=["GET", "POST"]),
+        Route("/clients/new", new_client, methods=["GET"]),
+        Route("/clients/{tenant_id}", client, methods=["GET"]),
     ])
 
 
@@ -304,6 +486,8 @@ dl{{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px}}dt{{color:v
 .badge{{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}}
 .badge.pending{{color:var(--accent)}}.badge.approved{{color:var(--ok)}}.badge.rejected{{color:var(--err)}}
 form{{margin-top:24px}}label{{display:block;margin-bottom:4px;color:var(--muted)}}
+input[type=text],input[type=email],input[type=url],input[type=number]{{width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit;margin-bottom:12px}}
+label.inline{{display:inline;margin-right:12px;color:var(--fg)}}
 textarea{{width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit}}
 .actions{{display:flex;gap:8px;margin-top:12px}}button{{font:inherit;padding:8px 18px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}}
 button.primary{{background:var(--accent);border-color:var(--accent);color:#fff}}
@@ -332,12 +516,21 @@ def main() -> None:
     audit = AuditService(ports.ledger, ports.blobs, ports.notifier, ports.clock)
     approvals = ApprovalService(ports.store, ports.bus, ports.directory, ports.notifier, audit, ports.clock, config,
                                 links=links)
+    from tower.agents.onboarding import OnboardingAgent
+    from tower.services.briefs import BriefWriter
+    from tower.services.client_keys import MASTER_SECRET
+
+    if config.approval_briefs:      # onboarding requests submitted here get a brief like any other
+        approvals.briefs = BriefWriter(ports.store, ports.llm)
+    onboarding = OnboardingAgent(ports.store, ports.bus, approvals, audit, ports.notifier, ports.directory,
+                                 ports.clock, config, gateway_url=ports.gateway_url)
     copilot = None
     if ports.llm is not None:
         from types import SimpleNamespace
         load_catalogs(SimpleNamespace(config=config, ports=ports))   # which client owns which SKU
         copilot = Copilot(ports.store, ports.ledger, ports.directory, audit, ports.clock, config, ports.llm)
-    uvicorn.run(create_app(Console(approvals, links, copilot)), host="0.0.0.0", port=int(os.environ.get("PORT", "8080")),
+    console = Console(approvals, links, copilot, onboarding, key_master=lambda: ports.secrets.get_secret(MASTER_SECRET))
+    uvicorn.run(create_app(console), host="0.0.0.0", port=int(os.environ.get("PORT", "8080")),
                 log_level="warning")
 
 

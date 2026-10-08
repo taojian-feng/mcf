@@ -12,7 +12,7 @@ import json
 import sys
 from typing import Any
 
-from tower.core.models import ApprovalCategory, OwningParty
+from tower.core.models import CLIENT_CATEGORIES, ApprovalCategory, OwningParty
 from tower.core.tenants import PROVIDER, TENANT_ONE, Tenant, tenant_one
 from tower.services.approval import approver_role, backup_role
 
@@ -21,7 +21,8 @@ PILOT_CONTACTS = {"program_lead": "pilot_program_lead", "governance_owner": "pil
                   "exception_operator": "exception_operator", "fulfillment_ops": "fulfillment_ops",
                   "ops_team": "ops-team"}
 PARTY_CONTACTS = {"ops": "{p}_ops", "escalation": "{p}_escalation", "data": "{p}_data_contact",
-                  "inventory": "{p}_inventory", "planner": "{p}_planner", "review": "{p}_review"}
+                  "inventory": "{p}_inventory", "planner": "{p}_planner", "review": "{p}_review",
+                  "billing": "{p}_billing"}
 CONTRACT_FIELDS = ("name", "active", "order_prefix", "feed_folder", "api_key_secret", "outbound_url",
                    "outbound_key_secret", "promise_days", "channels", "online_protect_days", "store_lead_days",
                    "return_window_days", "return_ship_by_days")
@@ -67,7 +68,7 @@ def build(doc: dict[str, Any]) -> dict[str, Any]:
         approvers = section.get("approvers") or {}
         backups = section.get("backup_approvers") or {}
         named = set()
-        for category in ApprovalCategory:
+        for category in (ApprovalCategory if party == OwningParty.CORP_A else CLIENT_CATEGORIES):
             main = _emails(approvers.get(category.value)) or default
             grant(main, approver_role(category, party, tid))
             backup = _emails(backups.get(category.value))

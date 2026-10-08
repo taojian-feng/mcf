@@ -5,6 +5,8 @@
   POST /v1/store-orders        A client's store system sends store replenishment orders (cases, delivery
                                window), for clients whose contract includes stores.
   POST /v1/returns             A client's order management asks for a consumer return of a delivered order.
+  POST /v1/catalog             A client sends its item catalog (UPC, title, unit cost). It lands in the
+                               client's feed folder like a file drop and is loaded the same way.
   POST /v1/mcf/notifications   Corp A pushes order status, tracking, inventory, shipment facts,
                                disposition results and case updates (X-MCF-Signature: HMAC-SHA256).
 
@@ -33,13 +35,15 @@ from starlette.routing import Route
 
 from tower.core import topics
 from tower.core.models import ConsumerOrder, ReturnRequest, StoreOrder, UnhappyPathSignal
-from tower.core.ports import Clock, Event, MessageBus
+from tower.core.ports import BlobStore, Clock, Event, MessageBus
 from tower.core.tenants import Tenant, default_tenants
+from tower.services.client_keys import MASTER_SECRET, api_key as issued_api_key
 
 log = logging.getLogger("tower.gateway")
 
 CORPA_WEBHOOK_SECRET = "partner-corpa-webhook-secret"
 MAX_SKEW_S = 300
+MAX_CATALOG_ITEMS = 20_000
 
 # Corp A's order statuses -> our lifecycle states. RECEIVED is ours already.
 STATUS_MAP = {
@@ -72,8 +76,11 @@ def verify_signature(secret: str, header: str, body: bytes, now: float) -> bool:
 class Gateway:
     def __init__(self, bus: MessageBus, secret: Callable[[str], str], clock: Clock,
                  wall: Callable[[], float] = time.time,
-                 tenants: Callable[[], dict[str, Tenant]] = default_tenants):
+                 tenants: Callable[[], dict[str, Tenant]] = default_tenants, blobs: BlobStore | None = None,
+                 announce_feeds: bool = False):
         self.bus, self.secret, self.clock, self.wall, self.tenants = bus, secret, clock, wall, tenants
+        # On Azure, Event Grid announces every file in the landing container; elsewhere the gateway does.
+        self.blobs, self.announce_feeds = blobs, announce_feeds
 
     # ---------------------------------------------------------------- clients: orders
 
@@ -82,20 +89,21 @@ class Gateway:
         found = None
         for t in self.tenants().values():
             try:
-                expected = self.secret(t.api_key_secret)
+                expected = (issued_api_key(self.secret(MASTER_SECRET), t) if t.keys == "issued"
+                            else self.secret(t.api_key_secret))
             except Exception:  # noqa: BLE001 - a client without a key yet cannot call
                 continue
             if expected and hmac.compare_digest(api_key.encode(), expected.encode()):
                 found = found or t
         return found
 
-    def _caller(self, api_key: str, body: Any, channel: str) -> tuple[Tenant, dict[str, Any]]:
+    def _caller(self, api_key: str, body: Any, channel: str | None) -> tuple[Tenant, dict[str, Any]]:
         tenant = self.tenant_for(api_key) if api_key else None
         if tenant is None:
             raise GatewayError(401, "invalid API key")
         if not tenant.active:
             raise GatewayError(403, f"client {tenant.tenant_id} is not active")
-        if channel not in tenant.channels:
+        if channel and channel not in tenant.channels:
             raise GatewayError(403, f"client {tenant.tenant_id} has no {channel} orders in its contract")
         if not isinstance(body, dict):
             raise GatewayError(422, "order failed validation", ["body: must be a JSON object"])
@@ -156,6 +164,35 @@ class Gateway:
         self.bus.publish(Event(topics.RETURNS_EVENTS, "return_requested", req.model_dump(mode="json"),
                                self.clock.now(), event_id=f"ret_{req.return_id}", correlation_id=req.order_id))
         return {"accepted": True, "return_id": client_id}
+
+    def receive_catalog(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
+        tenant, body = self._caller(api_key, body, None)
+        if self.blobs is None:
+            raise GatewayError(503, "catalog uploads aren't available here")
+        items = body.get("items")
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_CATALOG_ITEMS:
+            raise GatewayError(422, "catalog failed validation", [f"items: a list of 1 to {MAX_CATALOG_ITEMS} items"])
+        problems = []
+        for i, it in enumerate(items):
+            upc = it.get("upc") if isinstance(it, dict) else None
+            if not (isinstance(upc, str) and len(upc) == 12 and upc.isdigit()):
+                problems.append(f"items.{i}.upc: 12 digits")
+            elif not isinstance(it.get("unit_cost", 0), (int, float)) or it.get("unit_cost", 0) < 0:
+                problems.append(f"items.{i}.unit_cost: a number, 0 or more")
+            if len(problems) >= 20:
+                break
+        if problems:
+            raise GatewayError(422, "catalog failed validation", problems)
+        records = [{k: it.get(k) for k in ("upc", "title", "category", "unit_cost", "weight_lb", "case_pack") if k in it}
+                   for it in items]
+        now = self.clock.now()
+        path = f"{tenant.feed_folder}/catalog/{now:%Y-%m-%d}-{hashlib.sha256(json.dumps(records).encode()).hexdigest()[:8]}.json"
+        self.blobs.write("landing", path, json.dumps({"feed_type": "catalog", "generated_at": now.isoformat(),
+                                                      "records": records}).encode())
+        if self.announce_feeds:
+            self.bus.publish(Event(topics.FEEDS_ARRIVED, "Microsoft.Storage.BlobCreated",
+                                   {"subject": f"/blobServices/default/containers/landing/blobs/{path}"}, now))
+        return {"accepted": True, "items": len(records), "file": path}
 
     # ---------------------------------------------------------------- Corp A: notifications
 
@@ -283,6 +320,15 @@ def create_app(gateway: Gateway) -> Starlette:
             return JSONResponse({"error": "body is not JSON"}, 400)
         return await _run(gateway.receive_return, request.headers.get("x-api-key", ""), body)
 
+    async def catalog(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "body is not JSON"}, 400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, 422)
+        return await _run(gateway.receive_catalog, request.headers.get("x-api-key", ""), body)
+
     async def notifications(request: Request) -> JSONResponse:
         return await _run(gateway.receive_notification, request.headers.get("x-mcf-signature", ""),
                           await request.body())
@@ -301,16 +347,21 @@ def create_app(gateway: Gateway) -> Starlette:
         Route("/v1/orders", orders, methods=["POST"]),
         Route("/v1/store-orders", store_orders, methods=["POST"]),
         Route("/v1/returns", returns, methods=["POST"]),
+        Route("/v1/catalog", catalog, methods=["POST"]),
         Route("/v1/mcf/notifications", notifications, methods=["POST"]),
     ])
 
 
-def tenant_source(appconfig_url: str | None, cred, every_s: float = 300) -> Callable[[], dict[str, Tenant]]:
-    """The client registry from App Configuration, re-read every few minutes so a new client needs no restart."""
+def tenant_source(appconfig_url: str | None, cred, every_s: float = 300, store=None) -> Callable[[], dict[str, Tenant]]:
+    """The client registry (App Configuration, plus clients onboarded through the tower when `store` is
+    given), re-read every few minutes so a new client needs no restart."""
     if not appconfig_url:
         return default_tenants
     from tower.adapters.azure import AppConfigDirectory
     directory = AppConfigDirectory(appconfig_url, cred)
+    if store is not None:
+        from tower.services.clients import ClientDirectory
+        directory = ClientDirectory(directory, store, ttl_s=0)
     cache: dict[str, Any] = {"at": 0.0, "tenants": default_tenants()}
 
     def get() -> dict[str, Tenant]:
@@ -329,14 +380,17 @@ def main() -> None:
 
     import uvicorn
 
-    from tower.adapters.azure import KeyVaultSecrets, ServiceBusBus, SystemClock, _credential
+    from tower.adapters.azure import AzureBlobStore, CosmosStore, KeyVaultSecrets, ServiceBusBus, SystemClock, _credential
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    env = os.environ
     cred = _credential()
-    secrets = KeyVaultSecrets(os.environ["MCF_KEYVAULT_URL"], cred)
-    tenants = tenant_source(os.environ.get("MCF_APPCONFIG_URL"), cred)
-    gateway = Gateway(ServiceBusBus(os.environ["MCF_SERVICEBUS_NAMESPACE"], cred), secrets.get_secret, SystemClock(),
-                      tenants=tenants)
+    secrets = KeyVaultSecrets(env["MCF_KEYVAULT_URL"], cred)
+    store = CosmosStore(env["MCF_COSMOS_URL"], env.get("MCF_COSMOS_DB", "mcf"), cred) if env.get("MCF_COSMOS_URL") else None
+    tenants = tenant_source(env.get("MCF_APPCONFIG_URL"), cred, store=store)
+    blobs = AzureBlobStore(env["MCF_BLOB_URL"], cred) if env.get("MCF_BLOB_URL") else None
+    gateway = Gateway(ServiceBusBus(env["MCF_SERVICEBUS_NAMESPACE"], cred), secrets.get_secret, SystemClock(),
+                      tenants=tenants, blobs=blobs)
     uvicorn.run(create_app(gateway), host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), log_level="warning")
 
 

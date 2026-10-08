@@ -24,6 +24,7 @@ from tower.core import topics
 from tower.core.models import OwningParty
 from tower.core.ports import Event, MCFTransport
 from tower.core.tenants import TENANT_ONE, Tenant
+from tower.services.client_keys import MASTER_SECRET, webhook_key
 
 log = logging.getLogger("tower.connectors")
 
@@ -91,7 +92,9 @@ class PartnerConnectors:
     def _deliver(self, url: str, event: Event, tenant: Tenant) -> None:
         body = json.dumps({"event_id": event.event_id, "type": event.type, "payload": event.payload,
                            "occurred_at": event.occurred_at.isoformat()}, default=str).encode()
-        headers = {"Content-Type": "application/json", "X-Api-Key": self.secret(tenant.outbound_key_secret)}
+        key = (webhook_key(self.secret(MASTER_SECRET), tenant) if tenant.keys == "issued"
+               else self.secret(tenant.outbound_key_secret))
+        headers = {"Content-Type": "application/json", "X-Api-Key": key}
         status = self.post(url, headers, body)
         if not 200 <= status < 300:
             raise DeliveryFailed(f"{url} answered {status} for {event.type} {event.event_id}")
@@ -212,10 +215,11 @@ class PartnerConnectors:
         self.system.audit.decision("integration_layer", "pilot_catalog_loaded", input_refs=[f"feed:{feed_id}"],
                                    result={"upcs": len(upcs)}, owning_party=OwningParty.CORP_B, tenant_id=tenant_id)
         # List the items with Corp A so it accepts orders and stock for them.
-        titles = {r["upc"]: r.get("title") for r in records if r.get("upc") in costs or r.get("upc") in upcs}
+        by_upc = {r["upc"]: r for r in records if r.get("upc") in upcs}
+        items = [{"sellerSku": u, "title": by_upc[u].get("title"), "unitCost": costs.get(u),
+                  "weightLb": by_upc[u].get("weight_lb")} for u in upcs]
         res = self.system.integration.call("CreateFeedDocument", {
-            "contentType": "LISTINGS", "feedId": feed_id,
-            "items": [{"sellerSku": u, "title": titles.get(u)} for u in upcs]}, agent="integration_layer")
+            "contentType": "LISTINGS", "feedId": feed_id, "items": items}, agent="integration_layer")
         if not res.ok and res.retryable:
             raise DeliveryFailed(f"listing feed {feed_id} not accepted by Corp A: {res.error_code}")
 

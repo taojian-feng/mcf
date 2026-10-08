@@ -119,6 +119,7 @@ jobs:
           seed partner-corpc-api-key "$(openssl rand -hex 24)"
           seed corpc-inbound-api-key "$(openssl rand -hex 24)"
           seed approval-link-key "$(openssl rand -hex 32)"   # signs the console links in approval emails
+          seed client-key-master "$(openssl rand -hex 32)"   # derives the API keys of clients onboarded in the console
 
       - name: Deploy infrastructure and the new images
         env: { SQL_ADMIN_GROUP_ID: "${{ vars.SQL_ADMIN_GROUP_ID }}", SQL_ADMIN_GROUP_NAME: "${{ vars.SQL_ADMIN_GROUP_NAME }}", DEPLOYER_ID: "${{ vars.AZURE_DEPLOYER_OBJECT_ID }}" }
