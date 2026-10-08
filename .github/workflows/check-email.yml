@@ -97,3 +97,26 @@ jobs:
             az monitor log-analytics query -w "$wsid" --analytics-query "$q" -o json \
               | jq -r '.[] | "| \(.outcome) | \(.email_kind) | \(.emails) | \(.last_at) | \(.example | gsub("\\|"; "/")) |"'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Agent activity in the last two days
+        run: |
+          set -o pipefail
+          ws=$(az resource list -g "$RG" --resource-type Microsoft.OperationalInsights/workspaces --query '[0].name' -o tsv)
+          wsid=$(az monitor log-analytics workspace show -g "$RG" -n "$ws" --query customerId -o tsv)
+          q='ContainerAppConsoleLogs_CL
+          | where TimeGenerated > ago(2d)
+          | summarize lines = count(),
+                      approvals = countif(Log_s has "tower.approval" and Log_s has " requested by "),
+                      errors = countif(Log_s has "ERROR" or Log_s has "Traceback"),
+                      last_error = take_anyif(substring(Log_s, 0, 200), Log_s has "ERROR" or Log_s has "Traceback")
+              by app = ContainerAppName_s
+          | order by lines desc'
+          {
+            echo "### Agent activity (last 2 days)"
+            echo "Approval requests are logged from this version on."
+            echo
+            echo "| App | Log lines | Approval requests | Errors | An error |"
+            echo "|---|---|---|---|---|"
+            az monitor log-analytics query -w "$wsid" --analytics-query "$q" -o json \
+              | jq -r '.[] | "| \(.app) | \(.lines) | \(.approvals) | \(.errors) | \(.last_error | gsub("\\|"; "/")) |"'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

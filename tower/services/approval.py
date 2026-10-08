@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from tower.core import topics
@@ -13,6 +14,8 @@ from tower.core.tenants import TENANT_ONE, party_key
 from .approval_links import ApprovalLinks
 from .audit import AuditService
 from .briefs import BriefWriter
+
+log = logging.getLogger("tower.approval")
 
 COLLECTION = "approvals"
 GOVERNANCE_OWNER = "pilot_governance_owner"
@@ -73,6 +76,8 @@ class ApprovalService:
                             result={"category": category.value, "routed_to": item.routed_to,
                                     "brief": (item.brief or {}).get("source")},
                             owning_party=owning_party, tenant_id=tenant_id, **_ids(content))
+        log.info("approval %s requested by %s (%s, %s); routed to %d approver(s)", item.approval_id, agent,
+                 category.value, party_key(owning_party, tenant_id), len(item.routed_to))
         if item.routed_to:
             for approver in item.routed_to:
                 self.notifier.send(approver, f"Approval needed: {_title(item)}", self._email(approver, item))
