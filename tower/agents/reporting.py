@@ -14,6 +14,7 @@ from tower.core import topics
 from tower.core.config import PilotConfig
 from tower.core.models import TERMINAL_EXCEPTION_STATES, ExceptionStatus, InventoryEventType, OwningParty
 from tower.core.ports import LLM, BlobStore, Clock, Directory, DocumentStore, Event, MessageBus, Notifier
+from tower.core.tenants import TENANT_ONE
 from tower.services.audit import OPS_TEAM, AuditService
 from tower.services.governance import AccessDenied, GovernanceService
 
@@ -63,11 +64,12 @@ class ReportingAgent:
     def compute_daily(self, day: date | None = None) -> dict[str, Any]:
         day = day or (self.clock.now().date() - timedelta(days=1))
         self.governance.check_insight_access(AGENT, f"metrics:{day}")
-        orders = self.store.query("orders")
+        orders = [o for o in self.store.query("orders") if _mine(o)]
+        mine = {o["order_id"] for o in orders}
         delivered = [o for o in orders if o.get("delivered_on") == day.isoformat()]
         shipped_ids = {o["order_id"] for o in orders
                        if any(t["state"] == "shipped" and t["at"][:10] == day.isoformat() for t in o["transitions"])}
-        facts = [f for f in self.store.query(FACTS) if f["shipped_on"] == day.isoformat()]
+        facts = [f for f in self.store.query(FACTS) if f["shipped_on"] == day.isoformat() and f.get("order_id") in mine]
         on_hand = sum(s["on_hand"] for s in self.store.query(INVENTORY_STATE))
 
         metrics: dict[str, dict[str, Any]] = {}
@@ -234,9 +236,9 @@ class ReportingAgent:
             "open_exceptions": [{"case_id": c["case_id"], "status": c["status"],
                                  "category": (c.get("classification") or {}).get("category")}
                                 for c in self.store.query("exception_cases")
-                                if ExceptionStatus(c["status"]) not in TERMINAL_EXCEPTION_STATES],
+                                if _mine(c) and ExceptionStatus(c["status"]) not in TERMINAL_EXCEPTION_STATES],
             "pending_approvals": [{"approval_id": a["approval_id"], "category": a["category"],
-                                   "created_at": a["created_at"]} for a in self.store.query("approvals", status="pending")],
+                                   "created_at": a["created_at"]} for a in self.store.query("approvals", status="pending") if _mine(a)],
         }
         summary["narrative"] = self._narrative(summary)
         self.store.put(SUMMARIES, f"weekly|{period_end}", summary)
@@ -301,6 +303,11 @@ class ReportingAgent:
 
     def _contact(self, name: str) -> str:
         return self.directory.contact(name) or name
+
+
+def _mine(doc: dict[str, Any]) -> bool:
+    """The pilot reports cover tenant one; records from before tenants existed are tenant one's."""
+    return (doc.get("tenant_id") or TENANT_ONE) == TENANT_ONE
 
 
 def _strip_insight(summary: dict[str, Any]) -> dict[str, Any]:

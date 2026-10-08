@@ -10,6 +10,7 @@ from datetime import timedelta
 from pydantic import BaseModel, Field
 
 from .models import ExceptionCategory, OwningParty
+from .tenants import TENANT_ONE, Tenant, default_tenants
 
 # Contiguous US states plus DC. Excludes AK, HI and territories (R5.9 "US 48 states").
 US48 = {
@@ -39,8 +40,12 @@ def _default_nodes() -> dict[str, NodeInfo]:
 
 
 class PilotConfig(BaseModel):
-    pilot_upcs: set[str] = Field(default_factory=set)  # 1,360 UPCs loaded from master data
+    pilot_upcs: set[str] = Field(default_factory=set)  # tenant one's catalog (1,360 UPCs from master data)
     eligible_states: set[str] = Field(default_factory=lambda: set(US48))
+
+    # Retail clients, and each one's catalog from its item master feed. Tenant one's catalog is pilot_upcs.
+    tenants: dict[str, Tenant] = Field(default_factory=default_tenants)
+    tenant_upcs: dict[str, set[str]] = Field(default_factory=dict)
 
     # R5
     ack_timeout: timedelta = timedelta(minutes=30)
@@ -131,3 +136,16 @@ class PilotConfig(BaseModel):
     # R6 reporting
     anomaly_threshold: float = 0.20            # relative deviation from trailing 4-week mean
     baseline_days: int = 28
+
+    # Tenants
+
+    def tenant(self, tenant_id: str | None) -> Tenant | None:
+        return self.tenants.get(tenant_id or TENANT_ONE)
+
+    def catalog(self, tenant_id: str | None) -> set[str]:
+        tid = tenant_id or TENANT_ONE
+        return self.pilot_upcs if tid == TENANT_ONE else self.tenant_upcs.get(tid, set())
+
+    def states_for(self, tenant_id: str | None) -> set[str]:
+        t = self.tenant(tenant_id)
+        return t.eligible_states if t and t.eligible_states else self.eligible_states

@@ -64,8 +64,8 @@ def test_late_delivery_marked_late(system):
     assert order_record(system)["on_time"] is False
 
 
-@pytest.mark.parametrize("kw,reason", [({"upc": "999"}, "not in the pilot catalog"),
-                                       ({"state": "AK"}, "outside the US 48")])
+@pytest.mark.parametrize("kw,reason", [({"upc": "999"}, "not in the client's catalog"),
+                                       ({"state": "AK"}, "outside the client's delivery area")])
 def test_ineligible_orders_rejected_to_oms(system, kw, reason):
     send_order(system, order_payload(**kw))
     [rej] = system.ports.bus.events(topics.OMS_OUTBOUND, "order_rejected")

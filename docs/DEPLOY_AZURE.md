@@ -113,6 +113,21 @@ the portal to `mcf:roles`, `mcf:contacts` or `mcf:pilot_authorization_list` are 
 If the repository is public and you'd rather keep emails out of it, put the same YAML in a repository secret
 named `PILOT_PEOPLE`. The workflows use the secret instead of the file whenever it is set.
 
+### Adding a retail client
+
+Corp B is the first client. To add another (for example a simulated retailer):
+
+1. In `config/pilot.yaml`, copy the commented `retailer_two` example under `clients:`, give it an id (lowercase,
+   like `retailer_two`), a name, and its approvers and contacts. Blank slots fall back to `default_email`.
+2. Create its gateway key in Key Vault. The name is `partner-` plus the id without underscores plus `-api-key`:
+
+   ```
+   az keyvault secret set --vault-name mcfpilot-kv-extx327knrae --name partner-retailertwo-api-key --value "$(openssl rand -hex 24)"
+   ```
+
+3. Commit to `main`. The **Sync pilot people (dev)** workflow copies the client into Azure, and the gateway accepts
+   its orders within about five minutes. Its orders show up at Corp A as `RETAILERTWO-<order id>`.
+
 ### Email
 
 On by default. The deploy creates an Azure Communication Services email sender with a free Azure-managed

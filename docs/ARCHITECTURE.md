@@ -63,6 +63,21 @@ flowchart LR
 
 SLA timers (30-minute ack timeout, 4-hour delivery checks, 48h/24h approval reminders, handoff due times) are implemented as **scheduled messages** on the bus, so they survive restarts and are cloud-neutral (Service Bus scheduled messages, Pub/Sub plus Cloud Tasks, SQS delay plus EventBridge Scheduler).
 
+## 2a. Retail clients (tenants)
+
+Corp A runs one network for many retail clients. Each client is a tenant (`tower/core/tenants.py`) with its own contract (delivery promises it pays for, delivery area), catalog, API keys, people and data boundary. Corp B is tenant one.
+
+- **Who is calling.** The gateway finds the client from the API key alone (`partner-<client>-api-key` in Key Vault) and stamps the order with that tenant. A `tenant_id` in a request body is dropped.
+- **Order ids.** Clients choose their own order ids, so two clients can both send order 1001. Inside the tower and at Corp A an order is known by its fulfillment id, the client's order prefix plus its id (`RETAILERTWO-1001`). Tenant one has no prefix, so Corp B's ids are unchanged. Messages back to a client use the client's own id.
+- **Tenant on every record.** Orders, exception cases, signals, approvals, handoffs and audit records carry `tenant_id`. The audit ledger indexes it (ref type `tenant`), so `query(tenant=...)` returns one client's history.
+- **Contract checks.** Orders are checked against the client's catalog, delivery area and promise days. Promise days outside the contract are refused at the gateway (422).
+- **People.** Roles and contacts are named by client: `approver:<category>:<client>`, `<client>_ops`. Corp A's own stay `...:corp_a`. A client's approvers see and decide only that client's approvals, and the console shows nothing else.
+- **Insight data.** Each client's sales and forecasts are fenced by its own access list (`mcf:insight_access`). Nobody on one client's list can read another's.
+- **Outbound.** Order updates go to the client the event names, at its `outbound_url` (or `MCF_<CLIENT>_URL`) with its own key.
+- **Registry.** `config/pilot.yaml` lists the clients under `clients:`. Each deploy writes it to App Configuration as `mcf:tenants`, and the running services re-read it every few minutes, so adding a client needs no redeploy of code.
+
+Still tenant one only, until a second client owns stock (roadmap step 5): inventory, planning, disposition and the pilot reports. Another client's forecast and sales feeds are accepted into storage but not planned yet, and the pilot reports count only tenant one's orders.
+
 ## 3. Ports (what the core depends on)
 
 | Port | Purpose | Azure adapter | GCP (later) | AWS (later) |

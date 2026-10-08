@@ -1,26 +1,42 @@
-# Who does what in the pilot. Every deploy copies this into Azure (App Configuration).
+# Who does what, for Corp A and for each retail client it serves.
+# Every deploy copies this into Azure (App Configuration).
 #
 # To start, set default_email and leave everything else blank: that one address then
 # approves everything and gets every alert. Fill in other slots as real owners are named.
 # Lists take one or more emails, e.g. [ann@corpb.com, raj@corpb.com].
+#
+# Each client is one entry under `clients:`. Its people see and approve only that client's work.
 
 default_email: "fengtaojian123@yahoo.com"
 
-corp_b:
-  approvers:                  # who can approve each kind of Corp B decision
-    distribution_plan: []
-    replenishment: []
-    disposition: []
-    exception_resolution: []
-  backup_approvers:           # reminded when the main approver doesn't answer in time
-    exception_resolution: []
-  contacts:
-    ops: ""                   # day-to-day handoffs assigned to Corp B
-    escalation: ""            # handoffs that miss their deadline
-    data: ""                  # bad or missing data feeds
-    inventory: ""             # aging inventory alerts
-    planner: ""               # planning issues (e.g. no source inventory)
-    review: ""                # weekly and quarterly summaries
+clients:
+  corp_b:                       # tenant one
+    name: Corp B
+    promise_days: [2, 3]        # delivery promises the contract covers
+    delivery_states: us48       # or a list, e.g. [CA, NV, OR, WA]
+    approvers:                  # who can approve each kind of Corp B decision
+      distribution_plan: []
+      replenishment: []
+      disposition: []
+      exception_resolution: []
+    backup_approvers:           # reminded when the main approver doesn't answer in time
+      exception_resolution: []
+    contacts:
+      ops: ""                   # day-to-day handoffs assigned to Corp B
+      escalation: ""            # handoffs that miss their deadline
+      data: ""                  # bad or missing data feeds
+      inventory: ""             # aging inventory alerts
+      planner: ""               # planning issues (e.g. no source inventory)
+      review: ""                # weekly and quarterly summaries
+    can_see_insight_data: []    # extra people allowed to see this client's sales and forecasts
+
+  # Add the next client like this (its gateway key goes in Key Vault as partner-<id without _>-api-key):
+  # retailer_two:
+  #   name: Retailer Two
+  #   order_prefix: "RT2-"      # Corp A sees order 1001 as RT2-1001, so ids never collide
+  #   promise_days: [3]
+  #   approvers:
+  #     exception_resolution: [ops@retailertwo.com]
 
 corp_a:
   approvers:
@@ -37,6 +53,3 @@ pilot:
   exception_operator: ""      # escalated order exceptions
   fulfillment_ops: ""         # inventory mismatches
   ops_team: ""                # system problems (failing API calls, incomplete metrics)
-
-# Extra people allowed to see Corp B insight data. Approvers are added automatically.
-can_see_insight_data: []
