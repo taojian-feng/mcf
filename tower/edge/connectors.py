@@ -33,6 +33,11 @@ CATALOG_DOC = ("planning_meta", "catalog")  # tenant one's; other clients' are c
 def catalog_doc(tenant_id: str) -> tuple[str, str]:
     return CATALOG_DOC if tenant_id == TENANT_ONE else ("planning_meta", f"catalog:{tenant_id}")
 
+
+def feed_done_key(path: str) -> str:
+    """Marks a feed file as processed. Cosmos DB ids can't hold '/', so the path's slashes become '|'."""
+    return "feed:" + path.replace("/", "|")
+
 Poster = Callable[[str, dict[str, str], bytes], int]
 
 
@@ -129,7 +134,7 @@ class PartnerConnectors:
             log.warning("feed %s: folder %s belongs to no client", path, parts[0])
             return
         store = self.system.ports.store
-        done_key = f"feed:{path}"
+        done_key = feed_done_key(path)
         if store.get("planning_meta", done_key):
             return  # Event Grid delivers at least once
         records = self._records(path)
@@ -189,8 +194,8 @@ class PartnerConnectors:
             path = paths[-1]
             records = self._records(path)
             self.apply_catalog(records, f"catalog:{path.rsplit('/', 1)[-1].rsplit('.', 1)[0]}", tenant.tenant_id)
-            store.put("planning_meta", f"feed:{path}", {"path": path, "kind": "catalog", "records": len(records),
-                                                        "processed_at": self.system.ports.clock.now().isoformat()})
+            store.put("planning_meta", feed_done_key(path), {"path": path, "kind": "catalog", "records": len(records),
+                                                             "processed_at": self.system.ports.clock.now().isoformat()})
             log.warning("client %s had no catalog; loaded %s (%d records)", tenant.tenant_id, path, len(records))
             applied.append(path)
         return applied
