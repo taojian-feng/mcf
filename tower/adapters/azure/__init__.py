@@ -330,6 +330,7 @@ class AcsEmailNotifier:
                 "recipients": {"to": [{"address": address}]},
                 "content": {"subject": f"[Control Tower {severity}] {subject}", "plainText": body},
             })
+            print(json.dumps({"email_sent": {"to": address, "subject": subject, "severity": severity}}), flush=True)
         except Exception as e:  # noqa: BLE001 - delivery problems are logged, not raised
             self._log.send(address, subject, body, severity=severity, note=f"email failed: {e}")
 

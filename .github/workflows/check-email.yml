@@ -1,0 +1,98 @@
+# Checks that the tower's email reaches you: sends one test email the way the agents do, and shows what the
+# agents tried to email in the last two days. Manual only: Actions > Check email (dev) > Run workflow.
+name: Check email (dev)
+
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: Address for the test email (blank uses default_email from config/pilot.yaml)
+        type: string
+        default: ''
+
+permissions:
+  id-token: write   # GitHub OIDC token for azure/login
+  contents: read
+
+env:
+  RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Send a test email
+        env:
+          TO: ${{ inputs.to }}
+          PILOT_PEOPLE: ${{ secrets.PILOT_PEOPLE }}
+        run: |
+          pip install --quiet pyyaml azure-communication-email
+          if [ -z "$TO" ]; then
+            src=config/pilot.yaml
+            if [ -n "$PILOT_PEOPLE" ]; then printf '%s' "$PILOT_PEOPLE" > "$RUNNER_TEMP/pilot.yaml"; src="$RUNNER_TEMP/pilot.yaml"; fi
+            TO=$(python -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1])).get('default_email') or '')" "$src")
+          fi
+          [ -n "$TO" ] || { echo "::error::No address: set default_email in config/pilot.yaml or fill in the 'to' box"; exit 1; }
+          acs=$(az resource list -g "$RG" --resource-type Microsoft.Communication/communicationServices --query '[0].id' -o tsv)
+          [ -n "$acs" ] || { echo "::error::Email is off in this environment (no Communication Services resource)"; exit 1; }
+          svc=$(az resource list -g "$RG" --resource-type Microsoft.Communication/emailServices --query '[0].id' -o tsv)
+          domain="$svc/domains/AzureManagedDomain"
+          export SENDER="DoNotReply@$(az resource show --ids "$domain" --query properties.mailFromSenderDomain -o tsv)"
+          export CONN=$(az rest --method post --url "https://management.azure.com${acs}/listKeys?api-version=2023-04-01" --query primaryConnectionString -o tsv)
+          echo "::add-mask::$CONN"
+          export TO
+          python - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os
+          from datetime import datetime, timezone
+          from azure.communication.email import EmailClient
+          to, sender = os.environ["TO"], os.environ["SENDER"]
+          stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+          print(f"### Test email\n- From: `{sender}`\n- To: `{to}`")
+          try:
+              poller = EmailClient.from_connection_string(os.environ["CONN"]).begin_send({
+                  "senderAddress": sender, "recipients": {"to": [{"address": to}]},
+                  "content": {"subject": f"[Control Tower info] Test email {stamp}",
+                              "plainText": f"This is a test from the Check email (dev) workflow, sent {stamp}.\n"
+                                           "If you can read it, the tower's email reaches you."}})
+              result = poller.result(timeout=120)
+              print(f"- Azure's answer: **{result['status']}** (message id `{result['id']}`)")
+              if result.get("error"):
+                  print(f"- Error: {result['error']}")
+          except Exception as e:  # noqa: BLE001
+              print(f"- Azure refused it: **{type(e).__name__}: {str(e)[:400]}**")
+          EOF
+
+      - name: What the agents emailed in the last two days
+        run: |
+          az config set extension.use_dynamic_install=yes_without_prompt -o none
+          ws=$(az resource list -g "$RG" --resource-type Microsoft.OperationalInsights/workspaces --query '[0].name' -o tsv)
+          wsid=$(az monitor log-analytics workspace show -g "$RG" -n "$ws" --query customerId -o tsv)
+          q='ContainerAppConsoleLogs_CL
+          | where TimeGenerated > ago(2d)
+          | where Log_s startswith "{\"notification\"" or Log_s startswith "{\"email_sent\""
+          | extend j = parse_json(Log_s)
+          | extend subject = tostring(coalesce(j.email_sent.subject, j.notification.subject)),
+                   note = tostring(j.notification.note)
+          | extend outcome = case(isnotempty(j.email_sent), "handed to Azure email",
+                                  note startswith "email failed", "send failed",
+                                  isnotempty(note), note,
+                                  "logged only (email was off)")
+          | extend kind = case(subject has "Approval needed", "approval request", subject has "Reminder", "approval reminder", "alert")
+          | summarize emails = count(), last = max(TimeGenerated), example = take_any(substring(iff(outcome == "send failed", note, subject), 0, 200)) by outcome, kind
+          | order by emails desc'
+          {
+            echo "### What the agents tried to email (last 2 days)"
+            echo "Successful sends are recorded from this version on; older ones show only failures."
+            echo
+            echo "| Outcome | Kind | Emails | Last | Example |"
+            echo "|---|---|---|---|---|"
+            az monitor log-analytics query -w "$wsid" --analytics-query "$q" -o json \
+              | jq -r '.[] | "| \(.outcome) | \(.kind) | \(.emails) | \(.last) | \(.example | gsub("\\|"; "/")) |"'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
