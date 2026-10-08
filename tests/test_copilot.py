@@ -182,3 +182,18 @@ def test_eval_questions_come_from_the_world():
         results = ask_all(world, ScriptedLLM(answer_text="I can't do that."), items)
         refusals = [r for r in results if r.case.expected.startswith("says")]
         assert refusals and all(r.ok for r in refusals)
+
+
+# ---------------------------------------------------------------- console link on demand
+
+def test_console_link_goes_only_to_approvers_and_opens_the_console():
+    from tower.tools.console_link import approvers, message
+    s = make()
+    people = {"mcf:roles": {"alice@corpb": ["approver:replenishment:corp_b"], "ops@x": ["viewer"],
+                            "planning_agent": ["approver:replenishment:corp_b"]}}
+    assert approvers(people) == ["alice@corpb"]
+    subject, body = message(s.approvals.links, "alice@corpb")
+    assert "console link" in subject
+    http = TestClient(create_app(Console(s.approvals, s.approvals.links, s.copilot)))
+    for url in re.findall(r"https://console\.example(\S+)", body):
+        assert http.get(url).status_code == 200

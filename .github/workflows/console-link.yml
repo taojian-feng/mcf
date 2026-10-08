@@ -1,0 +1,50 @@
+# Emails approvers a fresh link to the approval console and "Ask the tower", without waiting for an approval.
+# Manual only: Actions > Send console link (dev) > Run workflow. The link goes only to people with an approver
+# role in config/pilot.yaml (or the PILOT_PEOPLE secret); it never appears in the run log.
+name: Send console link (dev)
+
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: One approver's email (blank sends to every approver)
+        type: string
+        default: ''
+
+permissions:
+  id-token: write   # GitHub OIDC token for azure/login
+  contents: read
+
+env:
+  RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Send the link
+        env:
+          TO: ${{ inputs.to }}
+          PILOT_PEOPLE: ${{ secrets.PILOT_PEOPLE }}
+        run: |
+          pip install --quiet pydantic pyyaml azure-identity azure-keyvault-secrets azure-communication-email
+          src=config/pilot.yaml
+          if [ -n "$PILOT_PEOPLE" ]; then printf '%s' "$PILOT_PEOPLE" > "$RUNNER_TEMP/pilot.yaml"; src="$RUNNER_TEMP/pilot.yaml"; fi
+          python -m tower.tools.people "$src" > "$RUNNER_TEMP/people.json"
+          acs=$(az resource list -g "$RG" --resource-type Microsoft.Communication/communicationServices --query '[0].id' -o tsv)
+          [ -n "$acs" ] || { echo "::error::Email is off in this environment"; exit 1; }
+          svc=$(az resource list -g "$RG" --resource-type Microsoft.Communication/emailServices --query '[0].id' -o tsv)
+          sender="DoNotReply@$(az resource show --ids "$svc/domains/AzureManagedDomain" --query properties.mailFromSenderDomain -o tsv)"
+          export MCF_ACS_CONNECTION=$(az rest --method post --url "https://management.azure.com${acs}/listKeys?api-version=2023-04-01" --query primaryConnectionString -o tsv)
+          echo "::add-mask::$MCF_ACS_CONNECTION"
+          vault=$(az keyvault list -g "$RG" --query '[0].properties.vaultUri' -o tsv)
+          console="https://$(az containerapp show -g "$RG" -n mcfpilot-console --query properties.configuration.ingress.fqdn -o tsv)"
+          python -m tower.tools.console_link --people "$RUNNER_TEMP/people.json" --console-url "$console" \
+            --vault "$vault" --sender "$sender" --to "$TO" | tee -a "$GITHUB_STEP_SUMMARY"

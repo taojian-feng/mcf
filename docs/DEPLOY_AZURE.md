@@ -147,7 +147,12 @@ Approval emails come from `DoNotReply@<random>.azurecomm.net` with a subject lik
 `[Control Tower info] Approval needed: ...`, to `default_email` unless `config/pilot.yaml` names someone else.
 If nothing arrives, run the GitHub Actions workflow **Check email (dev)**. It sends one test email the way the
 agents do, shows Azure's answer, and lists what the agents tried to email in the last two days and whether
-each send worked.
+each send worked. Tower email can land in spam at first: mark it "Not spam" once.
+
+Approval emails only come when an agent needs a person (a lost or damaged parcel, a cancellation after
+shipping, a stock move), which can be days apart. To open the console sooner, run **Send console link (dev)**:
+it emails every approver a 14-day link to their approvals and to Ask the tower. The link never appears in the
+run log, and only people with an approver role can get one.
 
 Each approval email has two links: one to the request and one to everything waiting for you. Both open the
 approval console (`mcfpilot-console`), where you read what the agent wants and why, then approve or reject with a
