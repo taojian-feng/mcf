@@ -42,15 +42,17 @@ class OrchestrationAgent:
         reasons = self._ineligibility(order)
         if reasons:
             self.bus.publish(Event(topics.OMS_OUTBOUND, "order_rejected",
-                                   {"order_id": order.order_id, "reasons": reasons}, self.clock.now(),
-                                   correlation_id=order.order_id))
+                                   {"order_id": order.client_order_id or order.order_id, "tenant_id": order.tenant_id,
+                                    "reasons": reasons}, self.clock.now(), correlation_id=order.order_id))
             self._audit("reject_ineligible_order", order.order_id, rationale="; ".join(reasons),
-                        skus=[ln.upc for ln in order.lines], action_key="submit_fulfillment_order")
+                        skus=[ln.upc for ln in order.lines], action_key="submit_fulfillment_order",
+                        tenant_id=order.tenant_id)
             return
 
         self.store.put(ORDER_PII, order.order_id, order.model_dump(mode="json"))
         rec = OrderRecord(
-            order_id=order.order_id, placed_at=order.placed_at,
+            order_id=order.order_id, tenant_id=order.tenant_id, client_order_id=order.client_order_id,
+            placed_at=order.placed_at,
             promised_by=order.placed_at.date() + timedelta(days=order.delivery_promise_days),
             delivery_promise_days=order.delivery_promise_days, lines=order.lines,
         )
@@ -59,11 +61,18 @@ class OrchestrationAgent:
         self._schedule("order_promise_check", rec.order_id, self.config.promise_check_interval)
 
     def _ineligibility(self, order: ConsumerOrder) -> list[str]:
-        reasons = [f"UPC {ln.upc} is not in the pilot catalog" for ln in order.lines
-                   if ln.upc not in self.config.pilot_upcs]
+        """Checked against the client's own contract: its catalog, delivery area and delivery promises."""
+        tenant = self.config.tenant(order.tenant_id)
+        if tenant is None or not tenant.active:
+            return [f"client {order.tenant_id} has no active contract"]
+        catalog = self.config.catalog(tenant.tenant_id)
+        reasons = [f"UPC {ln.upc} is not in the client's catalog" for ln in order.lines if ln.upc not in catalog]
         addr = order.consumer.address
-        if addr.country != "US" or addr.state.upper() not in self.config.eligible_states:
-            reasons.append(f"delivery state {addr.state} is outside the US 48 states")
+        if addr.country != "US" or addr.state.upper() not in self.config.states_for(tenant.tenant_id):
+            reasons.append(f"delivery state {addr.state} is outside the client's delivery area")
+        if order.delivery_promise_days not in tenant.promise_days:
+            reasons.append(f"a {order.delivery_promise_days}-day promise is not in the client's SLA "
+                           f"({', '.join(map(str, tenant.promise_days))} days)")
         return reasons
 
     # ---------------------------------------------------------------- submission + ack (R5.1, R5.2, R5.8)
@@ -76,7 +85,7 @@ class OrchestrationAgent:
         rec.ack_timer_id = self._schedule("order_ack_timeout", rec.order_id, self.config.ack_timeout,
                                           attempt=rec.submission_attempts)
         self._save(rec)
-        self._audit("submit_fulfillment_order", rec.order_id,
+        self._audit("submit_fulfillment_order", rec.order_id, tenant_id=rec.tenant_id,
                     rationale=f"attempt {rec.submission_attempts}",
                     result={"ok": bool(result and result.ok), "error": result.error_code if result else "withheld"},
                     skus=[ln.upc for ln in rec.lines])
@@ -106,7 +115,7 @@ class OrchestrationAgent:
         new = OrderState(event.payload["state"])
         at = datetime.fromisoformat(event.payload["at"]) if event.payload.get("at") else self.clock.now()
         if not is_valid_transition(rec.state, new):
-            self._audit("ignore_invalid_transition", rec.order_id,
+            self._audit("ignore_invalid_transition", rec.order_id, tenant_id=rec.tenant_id,
                         rationale=f"{rec.state.value} -> {new.value} not allowed")
             return
         if rec.state == OrderState.RECEIVED and rec.ack_timer_id:
@@ -118,16 +127,17 @@ class OrchestrationAgent:
             rec.delivered_on = at.date()
             rec.on_time = rec.delivered_on <= rec.promised_by
         self._save(rec)
-        self._audit(f"order_{new.value}", rec.order_id, action_key="fulfill_order",
+        self._audit(f"order_{new.value}", rec.order_id, tenant_id=rec.tenant_id, action_key="fulfill_order",
                     result={"on_time": rec.on_time} if new == OrderState.DELIVERED else {})
 
     def _propagate_tracking(self, rec: OrderRecord, payload: dict[str, Any]) -> None:
         tracking = {k: payload.get(k) for k in ("carrier", "tracking_number", "status", "events")}
         rec.tracking.append({**tracking, "received_at": self.clock.now().isoformat()})
         self._save(rec)
-        self.bus.publish(Event(topics.OMS_OUTBOUND, "tracking_update", {"order_id": rec.order_id, **tracking},
+        self.bus.publish(Event(topics.OMS_OUTBOUND, "tracking_update",
+                               {"order_id": rec.client_order_id or rec.order_id, "tenant_id": rec.tenant_id, **tracking},
                                self.clock.now(), correlation_id=rec.order_id))
-        self._audit("propagate_tracking", rec.order_id, action_key="propagate_tracking")
+        self._audit("propagate_tracking", rec.order_id, action_key="propagate_tracking", tenant_id=rec.tenant_id)
 
     # ---------------------------------------------------------------- promise monitoring (R5.4, R5.5, R5.10)
 
@@ -155,7 +165,7 @@ class OrchestrationAgent:
                              {"projected": breach_key, "promised_by": rec.promised_by.isoformat(),
                               "last_state": rec.state.value})
         self._save(rec)
-        self._audit("monitor_delivery_promise", rec.order_id, action_key="monitor_delivery_promise",
+        self._audit("monitor_delivery_promise", rec.order_id, tenant_id=rec.tenant_id, action_key="monitor_delivery_promise",
                     result={"projected": projected.isoformat() if projected else None,
                             "promised_by": rec.promised_by.isoformat()})
         self._schedule("order_promise_check", rec.order_id, self.config.promise_check_interval)
@@ -187,10 +197,10 @@ class OrchestrationAgent:
 
     def _signal(self, rec: OrderRecord, signal_type: str, details: dict[str, Any]) -> None:
         sig = UnhappyPathSignal(signal_type=signal_type, source=AGENT, order_id=rec.order_id,
-                                details=details, received_at=self.clock.now())
+                                details=details, received_at=self.clock.now(), tenant_id=rec.tenant_id)
         self.bus.publish(Event(topics.EXCEPTION_SIGNALS, signal_type, sig.model_dump(mode="json"),
                                self.clock.now(), correlation_id=rec.order_id))
-        self._audit(f"raise_{signal_type}", rec.order_id, rationale=str(details))
+        self._audit(f"raise_{signal_type}", rec.order_id, rationale=str(details), tenant_id=rec.tenant_id)
 
     def _schedule(self, kind: str, order_id: str, after: timedelta, **extra: Any) -> str:
         return self.bus.publish(Event(topics.TIMERS, kind, {"order_id": order_id, **extra}, self.clock.now(),
@@ -204,7 +214,8 @@ class OrchestrationAgent:
         self.store.put(ORDERS, rec.order_id, rec.model_dump(mode="json"))
 
     def _audit(self, action: str, order_id: str, *, action_key: str = "monitor_delivery_promise",
-               rationale: str = "", result: dict[str, Any] | None = None, skus: list[str] | None = None) -> None:
+               rationale: str = "", result: dict[str, Any] | None = None, skus: list[str] | None = None,
+               tenant_id: str | None = None) -> None:
         self.audit.decision(AGENT, action, rationale=rationale, result=result or {}, order_ids=[order_id],
-                            skus=skus or [], input_refs=[f"order:{order_id}"],
+                            skus=skus or [], input_refs=[f"order:{order_id}"], tenant_id=tenant_id,
                             owning_party=self.handoffs.owning_party(action_key, actor=AGENT))

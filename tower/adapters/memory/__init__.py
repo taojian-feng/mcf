@@ -145,10 +145,12 @@ class InMemoryLedger:
     def delete(self, record_id: str) -> None:
         raise LedgerTamperError("audit ledger is append-only")
 
-    def query(self, *, actor=None, order_id=None, sku=None, start=None, end=None) -> list[AuditRecord]:
+    def query(self, *, actor=None, order_id=None, sku=None, start=None, end=None, tenant=None) -> list[AuditRecord]:
         out = []
         for r in self._records:
             if actor and r.actor != actor:
+                continue
+            if tenant and r.tenant_id != tenant:
                 continue
             if order_id and order_id not in r.order_ids:
                 continue
@@ -164,10 +166,11 @@ class InMemoryLedger:
 
 class StaticDirectory:
     def __init__(self, roles: dict[str, set[str]] | None = None, pilot_list: set[str] | None = None,
-                 contacts: dict[str, str] | None = None):
+                 contacts: dict[str, str] | None = None, insight: dict[str, set[str]] | None = None):
         self.roles = roles or {}
         self.pilot_list = pilot_list or set()
         self.contacts = contacts or {}
+        self.insight = insight or {}
 
     def has_role(self, principal: str, role: str) -> bool:
         return role in self.roles.get(principal, set())
@@ -177,6 +180,9 @@ class StaticDirectory:
 
     def pilot_authorization_list(self) -> set[str]:
         return set(self.pilot_list)
+
+    def insight_access(self, tenant_id: str) -> set[str]:
+        return set(self.insight.get(tenant_id, set()))
 
     def contact(self, name: str) -> str | None:
         return self.contacts.get(name)

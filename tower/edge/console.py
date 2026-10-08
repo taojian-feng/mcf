@@ -26,7 +26,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 
 from tower.core.models import ApprovalItem, ApprovalStatus
-from tower.services.approval import ApprovalError, ApprovalService
+from tower.services.approval import ApprovalError, ApprovalService, owner_label
 from tower.services.approval_links import ApprovalLinks
 
 log = logging.getLogger("tower.console")
@@ -70,7 +70,7 @@ class Console:
         out += [f"<dt>{k}</dt><dd>{v}</dd>" for k, v in [
             ("Why", escape(item.rationale)),
             ("Requested by", escape(item.originating_agent.replace("_", " "))),
-            ("Owning party", escape(item.owning_party.value.replace("_", " ").title())),
+            ("Owning party", escape(owner_label(item))),
             ("Requested", _when(item.created_at)),
             ("Reference", f"<code>{escape(item.approval_id)}</code>"),
         ]]

@@ -196,7 +196,8 @@ class SqlLedger:
 
     def append(self, record: AuditRecord) -> None:
         refs = ([("order", v) for v in record.order_ids] + [("sku", v) for v in record.skus]
-                + [("node", v) for v in record.node_ids])
+                + [("node", v) for v in record.node_ids]
+                + ([("tenant", record.tenant_id)] if record.tenant_id else []))
         with self._conn() as cn:
             cur = cn.cursor()
             cur.execute(
@@ -210,11 +211,11 @@ class SqlLedger:
                                 [(record.record_id, t, v) for t, v in refs])
             cn.commit()
 
-    def query(self, *, actor=None, order_id=None, sku=None, start=None, end=None) -> list[AuditRecord]:
+    def query(self, *, actor=None, order_id=None, sku=None, start=None, end=None, tenant=None) -> list[AuditRecord]:
         sql, args = ["SELECT r.body FROM audit.records r WHERE 1=1"], []
         if actor:
             sql.append("AND r.actor = ?"); args.append(actor)
-        for ref_type, val in (("order", order_id), ("sku", sku)):
+        for ref_type, val in (("order", order_id), ("sku", sku), ("tenant", tenant)):
             if val:
                 sql.append("AND EXISTS (SELECT 1 FROM audit.record_refs x WHERE x.record_id = r.record_id "
                            "AND x.ref_type = ? AND x.ref_value = ?)")
@@ -252,10 +253,11 @@ class KeyVaultSecrets:
 # ---------------------------------------------------------------- App Configuration (Directory)
 
 class AppConfigDirectory:
-    """Roles, pilot authorization list and contacts from Azure App Configuration.
+    """Roles, insight access lists, contacts and the client registry from Azure App Configuration.
 
     Keys: mcf:roles (JSON principal -> [roles], synced from Entra ID groups / app roles),
-    mcf:pilot_authorization_list (JSON list), mcf:contacts (JSON name -> address).
+    mcf:pilot_authorization_list (JSON list, tenant one), mcf:insight_access (JSON tenant -> [principals]),
+    mcf:contacts (JSON name -> address), mcf:tenants (JSON tenant id -> client contract).
     Callers' identities are verified upstream (APIM validates Entra ID tokens).
     """
 
@@ -278,13 +280,32 @@ class AppConfigDirectory:
     def pilot_authorization_list(self) -> set[str]:
         return set(self._json("mcf:pilot_authorization_list", []))
 
+    def insight_access(self, tenant_id: str) -> set[str]:
+        return set(self._json("mcf:insight_access", {}).get(tenant_id, []))
+
     def contact(self, name: str) -> str | None:
         return self._json("mcf:contacts", {}).get(name)
 
+    def tenants(self):
+        """The client registry. Raises if App Configuration can't be read, so callers keep their last copy."""
+        from azure.core.exceptions import ResourceNotFoundError
+
+        from tower.core.tenants import Tenant, default_tenants
+        try:
+            raw = json.loads(self._client.get_configuration_setting(key="mcf:tenants").value)
+        except ResourceNotFoundError:
+            return default_tenants()
+        tenants = default_tenants()
+        for tid, doc in (raw or {}).items():
+            tenants[tid] = Tenant.model_validate({**doc, "tenant_id": tid})
+        return tenants
+
     def pilot_config(self):
-        """PilotConfig from key mcf:pilot_config (JSON); defaults for anything not set."""
+        """PilotConfig from key mcf:pilot_config (JSON) plus the client registry; defaults for anything not set."""
         from tower.core.config import PilotConfig
-        return PilotConfig.model_validate(self._json("mcf:pilot_config", {}))
+        config = PilotConfig.model_validate(self._json("mcf:pilot_config", {}))
+        config.tenants = self.tenants()
+        return config
 
 
 # ---------------------------------------------------------------- Communication Services (Notifier)

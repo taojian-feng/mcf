@@ -14,6 +14,8 @@ def new_id(prefix: str) -> str:
 
 
 class OwningParty(str, Enum):
+    """Which side of the contract owns an action. CORP_B is the retail client (whichever tenant the
+    record belongs to, see tenant_id); CORP_A is the logistics provider."""
     CORP_B = "corp_b"
     CORP_A = "corp_a"
 
@@ -72,17 +74,22 @@ class OrderLine(BaseModel):
 
 
 class ConsumerOrder(BaseModel):
-    """Order as received from Corp B order management."""
+    """Order as received from a client's order management. The gateway sets tenant_id and
+    client_order_id from the caller's credential; order_id is then the fulfillment id."""
     order_id: str
     placed_at: datetime
-    delivery_promise_days: int = Field(ge=2, le=3)
+    delivery_promise_days: int = Field(ge=1, le=10)  # the client's SLA decides which are accepted
     lines: list[OrderLine]
     consumer: ConsumerPII
+    tenant_id: str = "corp_b"
+    client_order_id: str | None = None
 
 
 class OrderRecord(BaseModel):
     """Order lifecycle record owned by the Orchestration agent. Holds no raw PII."""
-    order_id: str
+    order_id: str                      # fulfillment id
+    tenant_id: str = "corp_b"
+    client_order_id: str | None = None
     placed_at: datetime
     promised_by: date
     delivery_promise_days: int
@@ -135,6 +142,7 @@ class UnhappyPathSignal(BaseModel):
     node_id: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     received_at: datetime | None = None
+    tenant_id: str | None = None  # None: taken from the order, else tenant one
 
 
 class Classification(BaseModel):
@@ -147,6 +155,7 @@ class Classification(BaseModel):
 class ExceptionCase(BaseModel):
     case_id: str = Field(default_factory=lambda: new_id("exc"))
     signal: UnhappyPathSignal
+    tenant_id: str = "corp_b"
     opened_at: datetime
     classification: Classification | None = None
     status: ExceptionStatus = ExceptionStatus.OPEN
@@ -184,6 +193,7 @@ class AuditRecord(BaseModel):
     node_ids: list[str] = Field(default_factory=list)
     owning_party: OwningParty | None = None
     subject_id: str | None = None  # recommendation / approval / handoff id acted upon
+    tenant_id: str | None = None   # the client the record is about; None for network-wide work
 
 
 # ---------------------------------------------------------------- approvals (R8)
@@ -205,6 +215,7 @@ class ApprovalItem(BaseModel):
     approval_id: str = Field(default_factory=lambda: new_id("apr"))
     category: ApprovalCategory
     owning_party: OwningParty
+    tenant_id: str = "corp_b"
     originating_agent: str
     subject_id: str
     content: dict[str, Any]
@@ -232,6 +243,7 @@ class Handoff(BaseModel):
     action: str
     requesting_party: OwningParty
     responsible_party: OwningParty
+    tenant_id: str = "corp_b"
     created_at: datetime
     due_at: datetime
     status: HandoffStatus = HandoffStatus.OPEN

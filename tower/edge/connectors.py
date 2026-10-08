@@ -1,9 +1,12 @@
 """Outbound partner connectors and the feed intake, run inside the agents' consumer process.
 
-  oms.outbound    -> Corp B order management   POST {MCF_CORPB_URL}/oms/v1/events
-  corpb.outbound  -> Corp B (decant counts...)  POST {MCF_CORPB_URL}/corpb/v1/events
-  handoffs.events -> Corp A operations          CreateCase on the MCF API, for handoffs Corp A owns
-  feeds.arrived   -> a partner file landed in storage: catalog, forecast, sales or cold-start data
+  oms.outbound    -> the client's order management   POST {client URL}/oms/v1/events
+  corpb.outbound  -> Corp B (decant counts...)        POST {MCF_CORPB_URL}/corpb/v1/events
+  handoffs.events -> Corp A operations                CreateCase on the MCF API, for handoffs Corp A owns
+  feeds.arrived   -> a client file landed in storage: catalog, forecast, sales or cold-start data
+
+Each client's URL is its registry entry's outbound_url, else env MCF_<CLIENT>_URL (MCF_CORPB_URL for
+Corp B), and each client has its own key for it. An event goes only to the client it names.
 
 A failed delivery raises, so the bus redelivers the message and dead-letters it after repeated failures.
 """
@@ -20,11 +23,15 @@ from typing import Any, Callable
 from tower.core import topics
 from tower.core.models import OwningParty
 from tower.core.ports import Event, MCFTransport
+from tower.core.tenants import TENANT_ONE, Tenant
 
 log = logging.getLogger("tower.connectors")
 
-CATALOG_DOC = ("planning_meta", "catalog")
-CORPB_INBOUND_KEY = "corpb-inbound-api-key"
+CATALOG_DOC = ("planning_meta", "catalog")  # tenant one's; other clients' are catalog_doc(tenant)
+
+
+def catalog_doc(tenant_id: str) -> tuple[str, str]:
+    return CATALOG_DOC if tenant_id == TENANT_ONE else ("planning_meta", f"catalog:{tenant_id}")
 
 Poster = Callable[[str, dict[str, str], bytes], int]
 
@@ -44,29 +51,43 @@ class DeliveryFailed(Exception):
 
 class PartnerConnectors:
     def __init__(self, system, *, corpb_url: str | None, secret: Callable[[str], str],
-                 mcf: MCFTransport | None = None, post: Poster = urllib_post):
-        self.system, self.secret, self.post = system, secret, post
+                 mcf: MCFTransport | None = None, post: Poster = urllib_post,
+                 env: Callable[[str], str | None] = lambda name: None):
+        self.system, self.secret, self.post, self.env = system, secret, post, env
         self.corpb_url = corpb_url.rstrip("/") if corpb_url else None
         self.mcf = mcf if mcf is not None else system.ports.mcf
         bus = system.ports.bus
+        bus.subscribe(topics.OMS_OUTBOUND, self.to_oms, subscription="oms-connector")
         if self.corpb_url:
-            bus.subscribe(topics.OMS_OUTBOUND, self.to_oms, subscription="oms-connector")
             bus.subscribe(topics.CORPB_OUTBOUND, self.to_corpb, subscription="corpb-connector")
         bus.subscribe(topics.HANDOFF_EVENTS, self.to_corpa_ops, subscription="corpa-connector")
         bus.subscribe(topics.FEEDS_ARRIVED, self.on_feed, subscription="integration-layer")
 
-    # ---------------------------------------------------------------- Corp B
+    # ---------------------------------------------------------------- clients
+
+    def client_url(self, tenant: Tenant) -> str | None:
+        if tenant.tenant_id == TENANT_ONE and self.corpb_url:
+            return self.corpb_url
+        url = tenant.outbound_url or self.env(f"MCF_{tenant.feed_folder.upper()}_URL")
+        return url.rstrip("/") if url else None
 
     def to_oms(self, event: Event) -> None:
-        self._deliver(f"{self.corpb_url}/oms/v1/events", event)
+        tenant = self.system.config.tenant(event.payload.get("tenant_id"))
+        url = self.client_url(tenant) if tenant else None
+        if url is None:
+            log.warning("no order-management endpoint for client %s; %s %s not sent",
+                        event.payload.get("tenant_id") or TENANT_ONE, event.type, event.event_id)
+            return
+        self._deliver(f"{url}/oms/v1/events", event, tenant)
 
     def to_corpb(self, event: Event) -> None:
-        self._deliver(f"{self.corpb_url}/corpb/v1/events", event)
+        self._deliver(f"{self.corpb_url}/corpb/v1/events", event, self.system.config.tenant(TENANT_ONE))
 
-    def _deliver(self, url: str, event: Event) -> None:
+    def _deliver(self, url: str, event: Event, tenant: Tenant) -> None:
         body = json.dumps({"event_id": event.event_id, "type": event.type, "payload": event.payload,
                            "occurred_at": event.occurred_at.isoformat()}, default=str).encode()
-        status = self.post(url, {"Content-Type": "application/json", "X-Api-Key": self.secret(CORPB_INBOUND_KEY)}, body)
+        headers = {"Content-Type": "application/json", "X-Api-Key": self.secret(tenant.outbound_key_secret)}
+        status = self.post(url, headers, body)
         if not 200 <= status < 300:
             raise DeliveryFailed(f"{url} answered {status} for {event.type} {event.event_id}")
 
@@ -81,6 +102,7 @@ class PartnerConnectors:
         from tower.core.ports import MCFError
         try:
             self.mcf.call("CreateCase", {"caseId": p["handoff_id"], "action": p["action"], "dueAt": p.get("due_at"),
+                                         "clientId": p.get("tenant_id") or TENANT_ONE,
                                          "context": p.get("context") or {}})
         except MCFError as e:
             if e.retryable:
@@ -99,9 +121,13 @@ class PartnerConnectors:
         path = subject.split(marker, 1)[1]
         parts = path.split("/")
         if len(parts) < 3:
-            log.warning("feed %s: expected <party>/<feed type>/<file>", path)
+            log.warning("feed %s: expected <client>/<feed type>/<file>", path)
             return
         kind = parts[1]
+        tenant = next((t for t in self.system.config.tenants.values() if t.feed_folder == parts[0]), None)
+        if tenant is None:
+            log.warning("feed %s: folder %s belongs to no client", path, parts[0])
+            return
         store = self.system.ports.store
         done_key = f"feed:{path}"
         if store.get("planning_meta", done_key):
@@ -111,7 +137,11 @@ class PartnerConnectors:
         feed_id = f"{kind}:{parts[-1].rsplit('.', 1)[0]}"
         planning = self.system.planning
         if kind == "catalog":
-            self.apply_catalog(records, feed_id)
+            self.apply_catalog(records, feed_id, tenant.tenant_id)
+        elif tenant.tenant_id != TENANT_ONE:
+            # Planning runs on tenant one's inventory until clients own separate stock (roadmap step 5).
+            log.warning("feed %s: %s feeds are planned for %s only so far", path, kind, TENANT_ONE)
+            return
         elif kind == "forecast":
             planning.ingest_forecast(feed_id, records)
         elif kind == "sales":
@@ -125,16 +155,17 @@ class PartnerConnectors:
                                               "processed_at": self.system.ports.clock.now().isoformat()})
         log.info("feed %s: %d records processed", path, len(records))
 
-    def apply_catalog(self, records: list[dict[str, Any]], feed_id: str) -> None:
-        """Pilot item master: the UPCs in scope and their unit costs (used for replenishment value)."""
+    def apply_catalog(self, records: list[dict[str, Any]], feed_id: str, tenant_id: str = TENANT_ONE) -> None:
+        """A client's item master: the UPCs in scope and their unit costs (used for replenishment value)."""
         upcs = sorted({r["upc"] for r in records if isinstance(r.get("upc"), str) and len(r["upc"]) == 12})
         costs = {r["upc"]: float(r["unit_cost"]) for r in records
                  if r.get("upc") in upcs and isinstance(r.get("unit_cost"), (int, float))}
-        self.system.ports.store.put(*CATALOG_DOC, {"feed_id": feed_id, "upcs": upcs, "unit_cost": costs,
-                                                   "received_at": self.system.ports.clock.now().isoformat()})
-        apply_catalog_doc(self.system.config, {"upcs": upcs, "unit_cost": costs})
+        self.system.ports.store.put(*catalog_doc(tenant_id), {
+            "feed_id": feed_id, "tenant_id": tenant_id, "upcs": upcs, "unit_cost": costs,
+            "received_at": self.system.ports.clock.now().isoformat()})
+        apply_catalog_doc(self.system.config, {"upcs": upcs, "unit_cost": costs}, tenant_id)
         self.system.audit.decision("integration_layer", "pilot_catalog_loaded", input_refs=[f"feed:{feed_id}"],
-                                   result={"upcs": len(upcs)}, owning_party=OwningParty.CORP_B)
+                                   result={"upcs": len(upcs)}, owning_party=OwningParty.CORP_B, tenant_id=tenant_id)
         # List the items with Corp A so it accepts orders and stock for them.
         titles = {r["upc"]: r.get("title") for r in records if r.get("upc") in costs or r.get("upc") in upcs}
         res = self.system.integration.call("CreateFeedDocument", {
@@ -144,11 +175,16 @@ class PartnerConnectors:
             raise DeliveryFailed(f"listing feed {feed_id} not accepted by Corp A: {res.error_code}")
 
 
-def apply_catalog_doc(config, doc: dict[str, Any] | None) -> bool:
-    """Swap the in-process pilot catalog (attribute assignment, so readers never see a half-built set)."""
+def apply_catalog_doc(config, doc: dict[str, Any] | None, tenant_id: str = TENANT_ONE) -> bool:
+    """Swap a client's in-process catalog (attribute assignment, so readers never see a half-built set)."""
     if not doc or not doc.get("upcs"):
         return False
     upcs = set(doc["upcs"])
+    if tenant_id != TENANT_ONE:
+        if upcs == config.tenant_upcs.get(tenant_id):
+            return False
+        config.tenant_upcs = {**config.tenant_upcs, tenant_id: upcs}
+        return True
     if upcs != config.pilot_upcs:
         config.pilot_upcs = upcs
         config.unit_cost = {**config.unit_cost, **(doc.get("unit_cost") or {})}
@@ -156,13 +192,25 @@ def apply_catalog_doc(config, doc: dict[str, Any] | None) -> bool:
     return False
 
 
+def load_catalogs(system) -> bool:
+    """Every client's catalog from the store; True if any changed."""
+    changed = False
+    for tid in list(system.config.tenants):
+        changed |= apply_catalog_doc(system.config, system.ports.store.get(*catalog_doc(tid)), tid)
+    return changed
+
+
 def keep_catalog_fresh(system, every_s: float = 300) -> None:
-    """Other replicas and processes pick up a new catalog within a few minutes."""
+    """Other replicas and processes pick up new catalogs, and new clients, within a few minutes."""
+    load = getattr(system.ports.directory, "tenants", None)
+
     def loop() -> None:
         while True:
             try:
-                if apply_catalog_doc(system.config, system.ports.store.get(*CATALOG_DOC)):
-                    log.info("pilot catalog refreshed: %d UPCs", len(system.config.pilot_upcs))
+                if load:
+                    system.config.tenants = load()
+                if load_catalogs(system):
+                    log.info("catalogs refreshed: %s", {t: len(system.config.catalog(t)) for t in system.config.tenants})
             except Exception:  # noqa: BLE001 - try again next round
                 log.exception("catalog refresh failed")
             time.sleep(every_s)

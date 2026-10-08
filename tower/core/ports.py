@@ -74,6 +74,7 @@ class AuditLedger(Protocol):
         sku: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
+        tenant: str | None = None,
     ) -> list[AuditRecord]: ...
 
 
@@ -82,13 +83,17 @@ class SecretStore(Protocol):
 
 
 class Directory(Protocol):
-    """Identity lookups: roles for approvals, pilot authorization list, contacts."""
+    """Identity lookups: roles for approvals, who may see each client's insight data, contacts."""
 
     def has_role(self, principal: str, role: str) -> bool: ...
 
     def principals_with_role(self, role: str) -> list[str]: ...
 
-    def pilot_authorization_list(self) -> set[str]: ...
+    def pilot_authorization_list(self) -> set[str]:
+        """Who may see tenant one's insight data."""
+
+    def insight_access(self, tenant_id: str) -> set[str]:
+        """Who may see one client's insight data (sales, forecasts). Tenant one also uses the list above."""
 
     def contact(self, name: str) -> str | None:
         """Resolve a logical contact (e.g. 'corp_b_data_contact') to an address."""

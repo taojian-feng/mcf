@@ -32,11 +32,13 @@ class AuditService:
         node_ids: Iterable[str] = (),
         owning_party: OwningParty | None = None,
         subject_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> AuditRecord:
         rec = AuditRecord(
             kind=kind, at=self.clock.now(), actor=actor, action=action, rationale=rationale,
             input_refs=list(input_refs), result=result or {}, order_ids=list(order_ids),
             skus=list(skus), node_ids=list(node_ids), owning_party=owning_party, subject_id=subject_id,
+            tenant_id=tenant_id,
         )
         try:
             self.ledger.append(rec)

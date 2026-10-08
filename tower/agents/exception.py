@@ -12,6 +12,7 @@ from tower.core.models import (
     OwningParty, TERMINAL_EXCEPTION_STATES, UnhappyPathSignal,
 )
 from tower.core.ports import LLM, Clock, Directory, DocumentStore, Event, MessageBus, Notifier
+from tower.core.tenants import TENANT_ONE
 from tower.services.approval import ApprovalService
 from tower.services.audit import AuditService
 from tower.services.handoffs import HandoffService
@@ -163,8 +164,11 @@ class ExceptionAgent:
         sig = UnhappyPathSignal.model_validate(event.payload)
         if self.store.query(CASES, signal_id=sig.signal_id):
             return  # duplicate delivery
-        case = ExceptionCase(signal=sig, opened_at=self.clock.now())
-        order = order_evidence(self.store.get("orders", sig.order_id)) if sig.order_id else None
+        raw = self.store.get("orders", sig.order_id) if sig.order_id else None
+        # The order says whose it is; a signal about no order (e.g. inventory) carries its tenant or is tenant one's.
+        tenant = (raw or {}).get("tenant_id") or sig.tenant_id or TENANT_ONE
+        case = ExceptionCase(signal=sig, tenant_id=tenant, opened_at=self.clock.now())
+        order = order_evidence(raw) if raw else None
         if order is not None:
             case.history.append({"at": self.clock.now().isoformat(), "event": "order_record_read",
                                  "state": order.get("state"), "tracking_events": len(order.get("tracking") or [])})
@@ -247,14 +251,14 @@ class ExceptionAgent:
         if step in HANDOFF_STEPS:
             h = self.handoffs.create(
                 HANDOFF_STEPS[step], requesting_party=OwningParty.CORP_B, requested_by=AGENT,
-                blocked_steps=[f"{case.case_id}:{step}"],
+                blocked_steps=[f"{case.case_id}:{step}"], tenant_id=case.tenant_id,
                 context={"case_id": case.case_id, "order_id": sig.order_id, "step": step, "details": sig.details},
             )
             case.pending_handoffs.append(h.handoff_id)
         elif step.startswith("notify_oms_"):
             self.bus.publish(Event(topics.OMS_OUTBOUND, step.removeprefix("notify_oms_"),
-                                   {"order_id": sig.order_id, "case_id": case.case_id,
-                                    "category": case.classification.category.value},
+                                   {"order_id": self._client_order_id(case), "tenant_id": case.tenant_id,
+                                    "case_id": case.case_id, "category": case.classification.category.value},
                                    self.clock.now(), correlation_id=sig.order_id))
         else:
             raise StepFailed(f"no executor for step {step}")
@@ -268,7 +272,7 @@ class ExceptionAgent:
             subject_id=case.case_id,
             content={"order_id": case.signal.order_id, "playbook": pb.playbook_id, "version": pb.version,
                      "steps": list(pb.steps), "signal": case.signal.model_dump(mode="json")},
-            rationale=case.classification.rationale,
+            rationale=case.classification.rationale, tenant_id=case.tenant_id,
         )
         case.approval_id, case.status = item.approval_id, ExceptionStatus.AWAITING_APPROVAL
         self._save(case)
@@ -312,7 +316,7 @@ class ExceptionAgent:
         case = self._load(case_id)
         case.status = ExceptionStatus.CANCELLED if cancelled else ExceptionStatus.ESCALATED_AND_CLOSED
         self._save(case)
-        self.audit.human(by, "exception_closed", subject_id=case_id, reason=resolution,
+        self.audit.human(by, "exception_closed", subject_id=case_id, reason=resolution, tenant_id=case.tenant_id,
                          order_ids=[case.signal.order_id] if case.signal.order_id else [])
         self._notify_orchestration(case)
         return case
@@ -333,8 +337,8 @@ class ExceptionAgent:
         if case.status not in TERMINAL_EXCEPTION_STATES:
             case.status = ExceptionStatus.ESCALATED
         self._save(case)
-        body = json.dumps({"case_id": case.case_id, "reason": reason, "signal": case.signal.model_dump(mode="json"),
-                           **extra}, indent=2, default=str)
+        body = json.dumps({"case_id": case.case_id, "client": case.tenant_id, "reason": reason,
+                           "signal": case.signal.model_dump(mode="json"), **extra}, indent=2, default=str)
         self.notifier.send(self.directory.contact(OPERATOR) or OPERATOR, f"Exception escalated: {reason}", body,
                            severity="high")
         self._audit(case, "escalate_to_human", rationale=reason, result=extra)
@@ -355,7 +359,13 @@ class ExceptionAgent:
                             input_refs=[f"signal:{sig.signal_id}"],
                             order_ids=[sig.order_id] if sig.order_id else [],
                             skus=[sig.sku] if sig.sku else [], node_ids=[sig.node_id] if sig.node_id else [],
-                            owning_party=OwningParty.CORP_B)
+                            owning_party=OwningParty.CORP_B, tenant_id=case.tenant_id)
+
+    def _client_order_id(self, case: ExceptionCase) -> str | None:
+        """Messages to the client name the order by the client's own id."""
+        tenant = self.config.tenant(case.tenant_id)
+        oid = case.signal.order_id
+        return tenant.client_order_id(oid) if tenant and oid else oid
 
     def _log(self, case: ExceptionCase, what: str, **kw) -> None:
         case.history.append({"at": self.clock.now().isoformat(), "event": what, **kw})

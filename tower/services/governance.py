@@ -9,6 +9,7 @@ from typing import Any
 
 from tower.core.models import AuditKind, ConsumerOrder
 from tower.core.ports import Clock, Directory
+from tower.core.tenants import TENANT_ONE
 
 from .audit import AuditService
 
@@ -38,22 +39,30 @@ class GovernanceService:
         self.clock = clock
         self._key = masking_key
         self._ttl = cache_ttl_s
-        self._auth_cache: tuple[datetime, set[str]] | None = None
+        self._auth_cache: dict[str, tuple[datetime, set[str]]] = {}
 
     # ---------------------------------------------------------------- isolation (R9.1, R9.2, R9.8)
 
-    def _authorized(self) -> set[str]:
+    def _authorized(self, tenant_id: str) -> set[str]:
         now = self.clock.now()
-        if self._auth_cache is None or (now - self._auth_cache[0]).total_seconds() >= self._ttl:
-            self._auth_cache = (now, self.directory.pilot_authorization_list())
-        return self._auth_cache[1]
+        hit = self._auth_cache.get(tenant_id)
+        if hit is None or (now - hit[0]).total_seconds() >= self._ttl:
+            people = set()
+            per_tenant = getattr(self.directory, "insight_access", None)
+            if per_tenant:
+                people |= per_tenant(tenant_id)
+            if tenant_id == TENANT_ONE:
+                people |= self.directory.pilot_authorization_list()
+            hit = self._auth_cache[tenant_id] = (now, people)
+        return hit[1]
 
-    def check_insight_access(self, principal: str, resource: str) -> None:
-        if principal in self._authorized():
+    def check_insight_access(self, principal: str, resource: str, *, tenant_id: str = TENANT_ONE) -> None:
+        """Each client's sales and forecasts are visible only to people and agents on that client's list."""
+        if principal in self._authorized(tenant_id):
             return
-        self.audit.denied(principal, "corpb_insight_access_denied", input_refs=[resource],
-                          rationale="principal not on pilot authorization list")
-        raise AccessDenied(f"{principal} is not authorized for CorpB_Insight_Data")
+        self.audit.denied(principal, f"{tenant_id.replace('_', '')}_insight_access_denied", input_refs=[resource],
+                          rationale=f"principal not on {tenant_id}'s insight access list", tenant_id=tenant_id)
+        raise AccessDenied(f"{principal} is not authorized for {tenant_id} insight data")
 
     # ---------------------------------------------------------------- PII (R9.4, R9.6, R9.7)
 

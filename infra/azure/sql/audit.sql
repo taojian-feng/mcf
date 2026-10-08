@@ -19,7 +19,7 @@ GO
 IF OBJECT_ID('audit.record_refs') IS NULL
 CREATE TABLE audit.record_refs (
     record_id NVARCHAR(64)  NOT NULL,
-    ref_type  NVARCHAR(8)   NOT NULL,     -- order | sku | node
+    ref_type  NVARCHAR(8)   NOT NULL,     -- order | sku | node | tenant
     ref_value NVARCHAR(128) NOT NULL
 ) WITH (LEDGER = ON (APPEND_ONLY = ON));
 GO

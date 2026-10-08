@@ -35,7 +35,7 @@ jobs:
           src=config/pilot.yaml
           if [ -n "$PILOT_PEOPLE" ]; then printf '%s' "$PILOT_PEOPLE" > "$RUNNER_TEMP/pilot.yaml"; src="$RUNNER_TEMP/pilot.yaml"; fi
           python -m tower.tools.people "$src" > people.json
-          for key in mcf:roles mcf:contacts mcf:pilot_authorization_list; do
+          for key in mcf:roles mcf:contacts mcf:pilot_authorization_list mcf:insight_access mcf:tenants; do
             az appconfig kv set --endpoint "$endpoint" --auth-mode login --key "$key" \
               --value "$(jq -c --arg k "$key" '.[$k]' people.json)" --content-type application/json --yes -o none
           done

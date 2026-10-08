@@ -1,6 +1,7 @@
-"""Partner gateway: the HTTPS front door for Corp B and Corp A.
+"""Partner gateway: the HTTPS front door for retail clients and Corp A.
 
-  POST /v1/orders              Corp B order management sends consumer orders (X-Api-Key).
+  POST /v1/orders              A client's order management sends consumer orders (X-Api-Key). The key
+                               says which client is calling; the order is stamped with that tenant.
   POST /v1/mcf/notifications   Corp A pushes order status, tracking, inventory, shipment facts,
                                disposition results and case updates (X-MCF-Signature: HMAC-SHA256).
 
@@ -30,10 +31,10 @@ from starlette.routing import Route
 from tower.core import topics
 from tower.core.models import ConsumerOrder, UnhappyPathSignal
 from tower.core.ports import Clock, Event, MessageBus
+from tower.core.tenants import Tenant, default_tenants
 
 log = logging.getLogger("tower.gateway")
 
-CORPB_KEY = "partner-corpb-api-key"
 CORPA_WEBHOOK_SECRET = "partner-corpa-webhook-secret"
 MAX_SKEW_S = 300
 
@@ -67,22 +68,47 @@ def verify_signature(secret: str, header: str, body: bytes, now: float) -> bool:
 
 class Gateway:
     def __init__(self, bus: MessageBus, secret: Callable[[str], str], clock: Clock,
-                 wall: Callable[[], float] = time.time):
-        self.bus, self.secret, self.clock, self.wall = bus, secret, clock, wall
+                 wall: Callable[[], float] = time.time,
+                 tenants: Callable[[], dict[str, Tenant]] = default_tenants):
+        self.bus, self.secret, self.clock, self.wall, self.tenants = bus, secret, clock, wall, tenants
 
-    # ---------------------------------------------------------------- Corp B: orders
+    # ---------------------------------------------------------------- clients: orders
+
+    def tenant_for(self, api_key: str) -> Tenant | None:
+        """The client whose key this is. Every key is compared, so timing says nothing about which matched."""
+        found = None
+        for t in self.tenants().values():
+            try:
+                expected = self.secret(t.api_key_secret)
+            except Exception:  # noqa: BLE001 - a client without a key yet cannot call
+                continue
+            if expected and hmac.compare_digest(api_key.encode(), expected.encode()):
+                found = found or t
+        return found
 
     def receive_order(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
-        if not hmac.compare_digest(api_key, self.secret(CORPB_KEY)):
+        tenant = self.tenant_for(api_key) if api_key else None
+        if tenant is None:
             raise GatewayError(401, "invalid API key")
+        if not tenant.active:
+            raise GatewayError(403, f"client {tenant.tenant_id} is not active")
+        if not isinstance(body, dict):
+            raise GatewayError(422, "order failed validation", ["body: must be a JSON object"])
+        body = {k: v for k, v in body.items() if k not in ("tenant_id", "client_order_id")}  # never from the caller
         try:
             order = ConsumerOrder.model_validate(body)
         except ValidationError as ve:
             raise GatewayError(422, "order failed validation",
                                [f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in ve.errors()]) from ve
+        if order.delivery_promise_days not in tenant.promise_days:
+            raise GatewayError(422, "order failed validation",
+                               [f"delivery_promise_days: the contract covers {tenant.promise_days} days"])
+        client_id = order.order_id
+        order = order.model_copy(update={"tenant_id": tenant.tenant_id, "client_order_id": client_id,
+                                         "order_id": tenant.fulfillment_id(client_id)})
         self.bus.publish(Event(topics.ORDERS_RECEIVED, "order_received", order.model_dump(mode="json"),
                                self.clock.now(), event_id=f"ord_{order.order_id}", correlation_id=order.order_id))
-        return {"accepted": True, "order_id": order.order_id}
+        return {"accepted": True, "order_id": client_id}
 
     # ---------------------------------------------------------------- Corp A: notifications
 
@@ -192,6 +218,25 @@ def create_app(gateway: Gateway) -> Starlette:
     ])
 
 
+def tenant_source(appconfig_url: str | None, cred, every_s: float = 300) -> Callable[[], dict[str, Tenant]]:
+    """The client registry from App Configuration, re-read every few minutes so a new client needs no restart."""
+    if not appconfig_url:
+        return default_tenants
+    from tower.adapters.azure import AppConfigDirectory
+    directory = AppConfigDirectory(appconfig_url, cred)
+    cache: dict[str, Any] = {"at": 0.0, "tenants": default_tenants()}
+
+    def get() -> dict[str, Tenant]:
+        if time.time() - cache["at"] >= every_s:
+            try:
+                cache["tenants"] = directory.tenants()
+                cache["at"] = time.time()
+            except Exception:  # noqa: BLE001 - keep serving with the last good registry
+                log.exception("could not read the client registry")
+        return cache["tenants"]
+    return get
+
+
 def main() -> None:
     import os
 
@@ -202,7 +247,9 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cred = _credential()
     secrets = KeyVaultSecrets(os.environ["MCF_KEYVAULT_URL"], cred)
-    gateway = Gateway(ServiceBusBus(os.environ["MCF_SERVICEBUS_NAMESPACE"], cred), secrets.get_secret, SystemClock())
+    tenants = tenant_source(os.environ.get("MCF_APPCONFIG_URL"), cred)
+    gateway = Gateway(ServiceBusBus(os.environ["MCF_SERVICEBUS_NAMESPACE"], cred), secrets.get_secret, SystemClock(),
+                      tenants=tenants)
     uvicorn.run(create_app(gateway), host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), log_level="warning")
 
 

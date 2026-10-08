@@ -20,8 +20,8 @@ def main(argv: list[str]) -> None:
     load = getattr(ports.directory, "pilot_config", None)
     system = build(ports, load() if load else PilotConfig())
 
-    from tower.edge.connectors import CATALOG_DOC, PartnerConnectors, apply_catalog_doc, keep_catalog_fresh
-    apply_catalog_doc(system.config, ports.store.get(*CATALOG_DOC))  # the pilot item master from Corp B's feed
+    from tower.edge.connectors import PartnerConnectors, keep_catalog_fresh, load_catalogs
+    load_catalogs(system)  # each client's item master from its catalog feed
     if argv[:1] == ["job"]:
         system.run_job(argv[1])
         return
@@ -29,7 +29,7 @@ def main(argv: list[str]) -> None:
     if run is None:
         raise SystemExit("this bus adapter has no consumer loop (use MCF_CLOUD=azure)")
     secrets = getattr(ports, "secrets", None)
-    PartnerConnectors(system, corpb_url=os.environ.get("MCF_CORPB_URL"),
+    PartnerConnectors(system, corpb_url=os.environ.get("MCF_CORPB_URL"), env=os.environ.get,
                       secret=secrets.get_secret if secrets else (lambda name: os.environ[name.upper().replace("-", "_")]))
     keep_catalog_fresh(system)
     run()
