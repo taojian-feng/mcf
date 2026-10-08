@@ -71,21 +71,22 @@ jobs:
 
       - name: What the agents emailed in the last two days
         run: |
-          az config set extension.use_dynamic_install=yes_without_prompt -o none
+          set -o pipefail
+          az config set extension.use_dynamic_install=yes_without_prompt extension.dynamic_install_allow_preview=true -o none
           ws=$(az resource list -g "$RG" --resource-type Microsoft.OperationalInsights/workspaces --query '[0].name' -o tsv)
           wsid=$(az monitor log-analytics workspace show -g "$RG" -n "$ws" --query customerId -o tsv)
           q='ContainerAppConsoleLogs_CL
           | where TimeGenerated > ago(2d)
           | where Log_s startswith "{\"notification\"" or Log_s startswith "{\"email_sent\""
           | extend j = parse_json(Log_s)
-          | extend subject = tostring(coalesce(j.email_sent.subject, j.notification.subject)),
+          | extend subject = coalesce(tostring(j.email_sent.subject), tostring(j.notification.subject)),
                    note = tostring(j.notification.note)
           | extend outcome = case(isnotempty(j.email_sent), "handed to Azure email",
                                   note startswith "email failed", "send failed",
                                   isnotempty(note), note,
                                   "logged only (email was off)")
-          | extend kind = case(subject has "Approval needed", "approval request", subject has "Reminder", "approval reminder", "alert")
-          | summarize emails = count(), last = max(TimeGenerated), example = take_any(substring(iff(outcome == "send failed", note, subject), 0, 200)) by outcome, kind
+          | extend email_kind = case(subject has "Approval needed", "approval request", subject has "Reminder", "approval reminder", "alert")
+          | summarize emails = count(), last_at = max(TimeGenerated), example = take_any(substring(iff(outcome == "send failed", note, subject), 0, 200)) by outcome, email_kind
           | order by emails desc'
           {
             echo "### What the agents tried to email (last 2 days)"
@@ -94,5 +95,5 @@ jobs:
             echo "| Outcome | Kind | Emails | Last | Example |"
             echo "|---|---|---|---|---|"
             az monitor log-analytics query -w "$wsid" --analytics-query "$q" -o json \
-              | jq -r '.[] | "| \(.outcome) | \(.kind) | \(.emails) | \(.last) | \(.example | gsub("\\|"; "/")) |"'
+              | jq -r '.[] | "| \(.outcome) | \(.email_kind) | \(.emails) | \(.last_at) | \(.example | gsub("\\|"; "/")) |"'
           } | tee -a "$GITHUB_STEP_SUMMARY"
