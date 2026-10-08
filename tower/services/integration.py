@@ -17,7 +17,7 @@ from .audit import OPS_TEAM, AuditService
 MCF_OPERATIONS = frozenset({
     "CreateFulfillmentOrder", "GetFulfillmentOrder", "FulfillmentOrderStatus", "GetFulfillmentPreview",
     "GetPackageTrackingDetail", "CreateInboundShipmentPlan", "UpdateInboundShipment",
-    "CreateFeedDocument", "ApproveDistributionPlan",
+    "CreateFeedDocument", "ApproveDistributionPlan", "CreateFulfillmentReturn", "SetReturnDisposition",
 })
 
 BLANK_BOX_OVERPACK = "BLANK_BOX_OVERPACK"
@@ -124,6 +124,16 @@ class IntegrationLayer:
             ],
         }
         return self.call("CreateFulfillmentOrder", payload, agent=agent, order_ids=[rec["order_id"]])
+
+    def create_return(self, rec: dict[str, Any], order_lines: dict[str, str], *, agent: str) -> CallResult:
+        """Ask Corp A for a return authorization and a prepaid label. order_lines maps UPC to the order's line id."""
+        payload = {
+            "sellerFulfillmentOrderId": rec["order_id"], "sellerReturnId": rec["return_id"],
+            "items": [{"sellerReturnItemId": ln["line_id"], "sellerSku": ln["upc"],
+                       "sellerFulfillmentOrderItemId": order_lines.get(ln["upc"]), "quantity": ln["quantity"],
+                       "returnReasonCode": ln["reason"]} for ln in rec["lines"]],
+        }
+        return self.call("CreateFulfillmentReturn", payload, agent=agent, order_ids=[rec["order_id"]])
 
     # ---------------------------------------------------------------- feeds (R7.2, R7.3)
 

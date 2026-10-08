@@ -113,6 +113,9 @@ def create_app(engine: CorpA, tokens: Tokens, *, faults: tuple[float, float, flo
         Route("/mcf/v1/distribution-plans/{pid}/approve", guarded(lambda p, b: engine.approve_plan(p["pid"], b)),
               methods=["POST"]),
         Route("/mcf/v1/cases", guarded(lambda p, b: engine.create_case(b)), methods=["POST"]),
+        Route("/mcf/v1/returns", guarded(lambda p, b: engine.create_return(b)), methods=["POST"]),
+        Route("/mcf/v1/returns/{rma}/disposition", guarded(lambda p, b: engine.set_return_disposition(p["rma"], b)),
+              methods=["POST"]),
     ]
     return Starlette(routes=routes, lifespan=_lifespan(on_startup or []))
 

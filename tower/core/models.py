@@ -142,6 +142,70 @@ class OrderRecord(BaseModel):
     on_time: bool | None = None
 
 
+# ---------------------------------------------------------------- returns
+
+class ReturnReason(str, Enum):
+    NO_LONGER_NEEDED = "no_longer_needed"
+    NOT_AS_DESCRIBED = "not_as_described"
+    DAMAGED_IN_TRANSIT = "damaged_in_transit"
+    DEFECTIVE = "defective"
+
+
+class ReturnGrade(str, Enum):
+    """What Corp A's returns bench finds when it opens the parcel."""
+    SELLABLE = "SELLABLE"          # back to stock
+    DAMAGED = "DAMAGED"            # physically damaged: liquidate
+    DEFECTIVE = "DEFECTIVE"        # does not work: back to the vendor for credit
+    WRONG_ITEM = "WRONG_ITEM"      # the parcel held something else
+
+
+class ReturnState(str, Enum):
+    AUTHORIZED = "authorized"      # label issued, waiting for the consumer to ship
+    IN_TRANSIT = "in_transit"
+    ARRIVED = "arrived"            # at Corp A's returns bench, not yet graded
+    CLOSED = "closed"              # graded; refund decision sent to the client
+    EXPIRED = "expired"            # never shipped before the label ran out
+
+
+class ReturnLine(BaseModel):
+    line_id: str
+    upc: str
+    quantity: int = Field(gt=0)
+    reason: ReturnReason
+
+
+class ReturnRequest(BaseModel):
+    """A consumer return from a client's order management. The gateway sets tenant_id and the client ids;
+    return_id and order_id are then fulfillment ids."""
+    return_id: str
+    order_id: str
+    requested_at: datetime
+    lines: list[ReturnLine]
+    tenant_id: str = "corp_b"
+    client_return_id: str | None = None
+    client_order_id: str | None = None
+
+
+class ReturnRecord(BaseModel):
+    return_id: str                     # fulfillment id
+    tenant_id: str = "corp_b"
+    client_return_id: str
+    order_id: str                      # fulfillment id of the original order
+    client_order_id: str
+    requested_at: datetime
+    lines: list[ReturnLine]
+    state: ReturnState = ReturnState.AUTHORIZED
+    rma_id: str | None = None
+    return_to: str | None = None       # node the parcel goes back to
+    label: dict[str, Any] | None = None
+    ship_by: date | None = None
+    tracking: list[dict[str, Any]] = Field(default_factory=list)
+    received_at: datetime | None = None
+    graded: list[dict[str, Any]] = Field(default_factory=list)    # as Corp A reported: sku, quantity, grade
+    outcome: list[dict[str, Any]] = Field(default_factory=list)   # per line: refund and held units, why
+    dispositions: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------- exceptions (R3)
 
 class ExceptionCategory(str, Enum):

@@ -65,6 +65,7 @@ var topics = [
   'disposition.events'
   'shipments.facts'
   'corpb.outbound'
+  'returns.events'
 ]
 // subscriber -> topics it consumes (mirrors bus.subscribe calls in mcf/)
 var subscriptions = [
@@ -80,11 +81,13 @@ var subscriptions = [
   { name: 'corpb-connector', topics: [ 'corpb.outbound' ] }
   { name: 'integration-layer', topics: [ 'feeds.arrived' ] }
   { name: 'corpa-connector', topics: [ 'handoffs.events' ] }
+  { name: 'returns-agent', topics: [ 'returns.events', 'timers' ] }
 ]
 var subscriptionPairs = flatten(map(subscriptions, s => map(s.topics, t => { sub: s.name, topic: t })))
 var containers = [
   { name: 'order_pii', ttl: piiRetentionDays * 86400 }
   { name: 'orders', ttl: -1 }
+  { name: 'returns', ttl: -1 }
   { name: 'exception_cases', ttl: -1 }
   { name: 'approvals', ttl: -1 }
   { name: 'handoffs', ttl: -1 }

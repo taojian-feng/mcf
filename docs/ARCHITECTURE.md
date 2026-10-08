@@ -60,6 +60,7 @@ flowchart LR
 | `handoffs.events` | all | Handoff Tracker | R11 |
 | `alerts.ops` | all | Notifier | many |
 | `timers.*` | Scheduler (delayed messages) | owner of the timer | SLA checks |
+| `returns.events` | Gateway (client return requests; Corp A return status and grading) | Returns | roadmap step 6 |
 
 SLA timers (30-minute ack timeout, 4-hour delivery checks, 48h/24h approval reminders, handoff due times) are implemented as **scheduled messages** on the bus, so they survive restarts and are cloud-neutral (Service Bus scheduled messages, Pub/Sub plus Cloud Tasks, SQS delay plus EventBridge Scheduler).
 
@@ -78,6 +79,8 @@ Corp A runs one network for many retail clients. Each client is a tenant (`tower
 
 - **Stock per client.** Each client owns its own items (`config.tenant_of_sku`), so every inventory position belongs to one client and carries its `tenant_id`. Reconciliation runs for every client's items; decant counts sent to Corp B carry only Corp B's.
 - **Channels.** A contract lists `online`, `store` or both. Store orders (`POST /v1/store-orders`) are whole cases for a store's dock inside a delivery window. Before submission `services/allocation.py` cuts each line to what the client can spare after a web reserve (`online_protect_days` of recent web demand), records the numbers in the audit ledger and tells the store (`store_order_allocated`). Corp A ships them as B2B freight and sends an advance ship notice, which the tower forwards to the store.
+
+- **Returns.** A client's order management asks for a return of a delivered web order (`POST /v1/returns`). The Returns agent checks the client's policy (`return_window_days`), gets an RMA and a prepaid label from Corp A, follows the parcel, and when Corp A has graded every unit (sellable, damaged, defective, wrong item; missing units are counted) tells the client how many units it may refund and why any are held. Sellable units go back to stock at the returns node (Corp A books the receipt); damaged units are liquidated, defective ones go back to the vendor, wrong items are held for the client.
 
 Still tenant one only: planning, disposition and the pilot reports. Another client's forecast and sales feeds are accepted into storage but not planned yet, and store receiving discrepancies (short or damaged cases at the dock) are not handled yet.
 
@@ -127,8 +130,9 @@ Claude is available on all three clouds (Foundry, Vertex AI, Bedrock), which kee
 | R3 Exception | `agents/exception.py` | investigator: reads the order record, then Claude classifies with it (rules if Claude is off or fails), confidence threshold, versioned playbooks, halt-on-failure, escalation, terminal-state tracking, age timer | Service Bus, Cosmos, Foundry |
 | R4 Disposition | `agents/disposition.py` | daily aging + storage cost, one alert per crossing (idempotency key), recommendation to Approval, initiate within 24h of approval, completion window timer raises exception | Container Apps Job, Cosmos |
 | R5 Orchestration | `agents/orchestration.py` | order lifecycle state machine, eligibility (pilot UPC, US-48), submit via Integration Layer, 30-min ack timer with one retry, 4-hour promise checks, delay alerts, tracking propagation, on-time result | Service Bus sessions + scheduled messages, Cosmos |
+| Returns | `agents/returns.py` | client's return policy (delivered, inside the window, units not already returned), RMA and label from Corp A, parcel tracking, refund decision per line from Corp A's grades, disposition of unsellable units, expiry of unused labels | Service Bus, Cosmos |
 | R6 Reporting | `agents/reporting.py` | daily metrics, 4-week baselines, anomaly flags, weekly and QBR summaries, export feed, incomplete-data handling | Container Apps Job, ADLS, SQL, Foundry |
-| R7 Integration | `services/integration.py` | MCF client for 9 operations, schema validation + quarantine, exponential backoff 1s,2s,4s,8s,16s (5 retries) for retryable errors only, blank-box overpack on CreateFulfillmentOrder, integration alerts | APIM egress, Key Vault |
+| R7 Integration | `services/integration.py` | MCF client for 11 operations, schema validation + quarantine, exponential backoff 1s,2s,4s,8s,16s (5 retries) for retryable errors only, blank-box overpack on CreateFulfillmentOrder, integration alerts | APIM egress, Key Vault |
 | R8 Approval | `services/approval.py` | pending blocks execution, role check per category + Owning_Party, denied attempts audited, 48h then 24h reminders, routing alert when no approver; approval console (`edge/console.py`) reached by signed links in approval emails | Container App `console`; Entra sign-in later |
 | R9 Governance | `services/governance.py` | authorization list check, masking by purpose, withhold on masking failure, PII retention purge | App Configuration, Key Vault, Purview, Cosmos TTL |
 | R10 Audit | `services/audit.py` | single append API, query by agent/order/SKU/user/time, deny modify/delete, failure buffer + alert | SQL ledger tables, immutable Blob |

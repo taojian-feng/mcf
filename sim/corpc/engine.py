@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from sim import catalog, geo
+from sim.common.returns import ReturnDesk
 from sim.common.store import SimStore
 from sim.common.web import Sender, post_json, urllib_sender
 from sim.corpb.engine import FIRST, HOURLY, LAST, STREETS, _HOURLY_MEAN, _poisson
@@ -53,11 +54,14 @@ class CorpC:
     def __init__(self, store: SimStore, clock, *, gateway_url: str, api_key: str,
                  upload: Callable[[str, bytes], None], send: Sender = urllib_sender,
                  rng: random.Random | None = None, web_orders_per_day: float = 60, speed: float = 1.0,
-                 catalog_size: int = catalog.CORPC_SIZE, go_live_delay: timedelta = timedelta(minutes=15)):
+                 catalog_size: int = catalog.CORPC_SIZE, go_live_delay: timedelta = timedelta(minutes=15),
+                 return_rate: float = 0.06):
         self.store, self.clock, self.gateway_url, self.api_key = store, clock, gateway_url.rstrip("/"), api_key
         self.upload, self.send, self.rng = upload, send, rng or random.Random()
         self.web_orders_per_day, self.speed, self.go_live_delay = web_orders_per_day, speed, go_live_delay
         self.items = catalog.corpc_items(catalog_size)
+        self.returns = ReturnDesk(store, self.rng, gateway_url=gateway_url, api_key=api_key, send=send,
+                                  rate=return_rate, prefix="R")
         self.by_upc = {it.upc: it for it in self.items}
         self._web_weights = {r: [it.weekly_units[r] for it in self.items] for r in catalog.REGIONS}
         web_cities = [c for c in geo.CITIES if c[1] in {"WA", "OR", "CA", "AZ", "CO", "TX", "IL", "GA", "TN", "PA",
@@ -78,6 +82,7 @@ class CorpC:
         self._web_orders(now)
         self._store_day(now)
         self.flush()
+        self.returns.flush(now)
 
     def _go_live(self, now: datetime) -> datetime:
         meta = self.store.get("meta:catalog")
@@ -215,6 +220,8 @@ class CorpC:
         self.store.put({"id": f"evt:{event_id}", "doc_type": "inbound_event", "channel": channel,
                         "type": body.get("type"), "received_at": _iso(now), "body": body})
         p, kind = body.get("payload") or {}, body.get("type")
+        if self.returns.receive(kind, p, now):
+            return
         doc = self.store.get(f"order:{p.get('order_id')}") if p.get("order_id") else None
         if not doc:
             return
@@ -231,7 +238,9 @@ class CorpC:
             doc["status"] = "in_transit"
         elif kind == "tracking_update":
             status = (p.get("status") or "").lower()
-            doc["status"] = f"tracking:{status}"
+            was, doc["status"] = doc["status"], f"tracking:{status}"
+            if doc["channel"] == "web" and status == "delivered" and was != doc["status"]:
+                self.returns.on_delivered(doc, now)
             if doc["channel"] == "store" and status == "delivered":
                 self._receive_at_store(doc)
                 doc["status"] = "received"

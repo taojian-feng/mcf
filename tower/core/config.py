@@ -99,6 +99,10 @@ class PilotConfig(BaseModel):
             "approve_disposition": OwningParty.CORP_B,
             "execute_disposition": OwningParty.CORP_A,
             "compute_metrics": OwningParty.CORP_B,
+            "authorize_return": OwningParty.CORP_B,      # the client's return policy, applied by the tower
+            "receive_return": OwningParty.CORP_A,        # carrier pickup, receiving and grading
+            "decide_refund": OwningParty.CORP_B,
+            "dispose_return": OwningParty.CORP_A,
         }
     )
     handoff_ack_window: timedelta = timedelta(hours=4)

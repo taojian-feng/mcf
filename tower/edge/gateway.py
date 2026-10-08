@@ -4,6 +4,7 @@
                                says which client is calling; the order is stamped with that tenant.
   POST /v1/store-orders        A client's store system sends store replenishment orders (cases, delivery
                                window), for clients whose contract includes stores.
+  POST /v1/returns             A client's order management asks for a consumer return of a delivered order.
   POST /v1/mcf/notifications   Corp A pushes order status, tracking, inventory, shipment facts,
                                disposition results and case updates (X-MCF-Signature: HMAC-SHA256).
 
@@ -31,7 +32,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tower.core import topics
-from tower.core.models import ConsumerOrder, StoreOrder, UnhappyPathSignal
+from tower.core.models import ConsumerOrder, ReturnRequest, StoreOrder, UnhappyPathSignal
 from tower.core.ports import Clock, Event, MessageBus
 from tower.core.tenants import Tenant, default_tenants
 
@@ -98,7 +99,7 @@ class Gateway:
             raise GatewayError(403, f"client {tenant.tenant_id} has no {channel} orders in its contract")
         if not isinstance(body, dict):
             raise GatewayError(422, "order failed validation", ["body: must be a JSON object"])
-        return tenant, {k: v for k, v in body.items() if k not in ("tenant_id", "client_order_id")}  # never from the caller
+        return tenant, {k: v for k, v in body.items() if k not in ("tenant_id", "client_order_id", "client_return_id")}  # never from the caller
 
     @staticmethod
     def _parse(model, body: dict[str, Any]):
@@ -139,6 +140,22 @@ class Gateway:
         self.bus.publish(Event(topics.ORDERS_RECEIVED, "store_order_received", order.model_dump(mode="json"),
                                self.clock.now(), event_id=f"ord_{order.order_id}", correlation_id=order.order_id))
         return {"accepted": True, "order_id": client_id}
+
+    def receive_return(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
+        tenant, body = self._caller(api_key, body, "online")
+        if tenant.return_window_days <= 0:
+            raise GatewayError(403, f"client {tenant.tenant_id} has no returns in its contract")
+        req = self._parse(ReturnRequest, body)
+        if len({ln.line_id for ln in req.lines}) != len(req.lines) or not req.lines:
+            raise GatewayError(422, "return failed validation", ["lines: one or more, line_id unique"])
+        client_id = req.return_id
+        req = req.model_copy(update={"tenant_id": tenant.tenant_id, "client_return_id": client_id,
+                                     "client_order_id": req.order_id,
+                                     "return_id": tenant.fulfillment_id(client_id),
+                                     "order_id": tenant.fulfillment_id(req.order_id)})
+        self.bus.publish(Event(topics.RETURNS_EVENTS, "return_requested", req.model_dump(mode="json"),
+                               self.clock.now(), event_id=f"ret_{req.return_id}", correlation_id=req.order_id))
+        return {"accepted": True, "return_id": client_id}
 
     # ---------------------------------------------------------------- Corp A: notifications
 
@@ -202,6 +219,21 @@ class Gateway:
                    nid, order_id)
         return 1
 
+    def _n_return_status(self, nid: str, p: dict[str, Any]) -> int:
+        """The return parcel moved: picked up by the carrier, or delivered to Corp A's returns bench."""
+        self._emit(topics.RETURNS_EVENTS, "return_status", {
+            "return_id": p["sellerReturnId"], "rma_id": p.get("rmaId"), "status": p.get("status"),
+            "carrier": p.get("carrier"), "tracking_number": p.get("trackingNumber"), "at": p.get("eventTime")},
+                   nid, p.get("sellerFulfillmentOrderId"))
+        return 1
+
+    def _n_return_received(self, nid: str, p: dict[str, Any]) -> int:
+        """Corp A opened and graded the parcel: per item, how many units and in what condition."""
+        self._emit(topics.RETURNS_EVENTS, "return_received", {
+            "return_id": p["sellerReturnId"], "rma_id": p.get("rmaId"), "node_id": p.get("nodeId"),
+            "items": p.get("items") or [], "at": p.get("receivedAt")}, nid, p.get("sellerFulfillmentOrderId"))
+        return 1
+
     def _n_shipment_fact(self, nid: str, p: dict[str, Any]) -> int:
         self._emit(topics.SHIPMENT_FACTS, "shipment_fact", p, nid, p.get("order_id"))
         return 1
@@ -244,6 +276,13 @@ def create_app(gateway: Gateway) -> Starlette:
             return JSONResponse({"error": "body is not JSON"}, 400)
         return await _run(gateway.receive_store_order, request.headers.get("x-api-key", ""), body)
 
+    async def returns(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "body is not JSON"}, 400)
+        return await _run(gateway.receive_return, request.headers.get("x-api-key", ""), body)
+
     async def notifications(request: Request) -> JSONResponse:
         return await _run(gateway.receive_notification, request.headers.get("x-mcf-signature", ""),
                           await request.body())
@@ -261,6 +300,7 @@ def create_app(gateway: Gateway) -> Starlette:
                                                   "time": datetime.now(timezone.utc).isoformat()})),
         Route("/v1/orders", orders, methods=["POST"]),
         Route("/v1/store-orders", store_orders, methods=["POST"]),
+        Route("/v1/returns", returns, methods=["POST"]),
         Route("/v1/mcf/notifications", notifications, methods=["POST"]),
     ])
 

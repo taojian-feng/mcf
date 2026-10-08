@@ -26,7 +26,9 @@ PATHS: dict[str, tuple[str, str]] = {
     "UpdateInboundShipment": ("PUT", "/mcf/v1/inbound/shipments/{shipmentId}"),
     "CreateFeedDocument": ("POST", "/mcf/v1/feeds/documents"),
     "ApproveDistributionPlan": ("POST", "/mcf/v1/distribution-plans/{planId}/approve"),
-    "CreateCase": ("POST", "/mcf/v1/cases"),  # cross-boundary handoffs to Corp A operations (R11)
+    "CreateCase": ("POST", "/mcf/v1/cases"),
+    "CreateFulfillmentReturn": ("POST", "/mcf/v1/returns"),
+    "SetReturnDisposition": ("POST", "/mcf/v1/returns/{rmaId}/disposition"),  # cross-boundary handoffs to Corp A operations (R11)
 }
 
 STATUS_CODES = {

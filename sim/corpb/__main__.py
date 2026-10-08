@@ -37,6 +37,7 @@ def main() -> None:
     engine = CorpB(store, RealClock(), gateway_url=env["CORPB_GATEWAY_URL"],
                    api_key=load_secret("partner-corpb-api-key"), upload=blob_uploader(env["CORPB_LANDING_URL"]),
                    orders_per_day=float(env.get("CORPB_ORDERS_PER_DAY", "140")),
+                   return_rate=float(env.get("CORPB_RETURN_RATE", "0.08")),
                    speed=float(env.get("SIM_SPEED", "1")))
 
     def loop() -> None:

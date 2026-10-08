@@ -113,6 +113,30 @@ to what Corp C can spare: on hand across the network, minus units held by open o
 (the last 14 days' web demand per day times `online_protect_days`), in whole cases. The store hears the result
 first as `store_order_allocated`; if no line gets a case the order is `order_rejected` with the numbers.
 
+## Consumer returns (both retailers)
+
+`POST {gateway}/v1/returns` with `X-Api-Key`, from a client whose contract has `return_window_days` above 0:
+
+```json
+{"return_id": "RCB261007-4F2A1C", "order_id": "CB261007-4F2A1C", "requested_at": "2026-10-12T15:02:00+00:00",
+ "lines": [{"line_id": "1", "upc": "640000000008", "quantity": 1, "reason": "damaged_in_transit"}]}
+```
+
+Reasons: `no_longer_needed`, `not_as_described`, `damaged_in_transit`, `defective`. `202` accepted, `422` validation.
+The tower then answers on the client's `/oms/v1/events`:
+
+| Type | When | Payload |
+|---|---|---|
+| `return_rejected` | the order is not delivered, outside the window, or the units were already returned | `reasons` |
+| `return_authorized` | Corp A issued an RMA | `rma_id`, `label` (`carrier`, `trackingNumber`), `ship_by` |
+| `return_update` | the parcel was picked up, then reached the returns bench | `status` (`in_transit`, `arrived`) |
+| `return_received` | Corp A graded every unit | per line: `expected`, `grades`, `refund_units`, `held_units`, `holds` (units and why) |
+| `return_expired` | no carrier scan ten days after `ship_by` | `rma_id`, `ship_by` |
+
+Refund rule: sellable and defective units are refunded; damaged units only when the consumer reported damage in
+transit. Unreported damage, a different item in the parcel and units missing from the parcel are held for the
+client to review. The client issues the refund; the tower only says what arrived.
+
 ## Control Tower to Corp C
 
 `POST {corpc}/oms/v1/events`, same envelope as Corp B. Store orders get `store_order_allocated` (per line:
@@ -137,6 +161,8 @@ returns a bearer token valid for an hour. Then:
 | UpdateInboundShipment | `PUT /mcf/v1/inbound/shipments/{shipmentId}` |
 | CreateFeedDocument | `POST /mcf/v1/feeds/documents` (`contentType: LISTINGS` activates items) |
 | ApproveDistributionPlan | `POST /mcf/v1/distribution-plans/{planId}/approve` |
+| CreateFulfillmentReturn | `POST /mcf/v1/returns` (`sellerFulfillmentOrderId`, `sellerReturnId`, items with `returnReasonCode`; 202 with `rmaId`, `returnToNode`, `label`, `shipBy`; delivered parcel orders only) |
+| SetReturnDisposition | `POST /mcf/v1/returns/{rmaId}/disposition` (per graded item: `liquidate`, `return_to_vendor` or `hold_for_client`) |
 | CreateCase | `POST /mcf/v1/cases` (handoffs Corp A owns: carrier trace, reship, return intercept, cancellation, transfer, disposition) |
 
 Errors are `{"errors": [{"code", "message"}]}`. Like any partner API it throttles (429), has bad
@@ -156,6 +182,8 @@ Corp A retries until it gets a `2xx`, for up to 72 hours; duplicates are dropped
 | `TRACKING_UPDATE` | package, carrier, tracking number, `status`, recent scan `events` | tracking to Corp B; LOST, UNDELIVERABLE and DAMAGED scans open exceptions |
 | `INVENTORY_EVENTS` | `events`: receipt, pick, transfer, decant, adjustment, removal, physical_count | inventory ledger and reconciliation |
 | `ADVANCE_SHIP_NOTICE` | store freight: `sellerFulfillmentOrderId`, `asnId`, carrier, PRO number, bill of lading, dock `appointment`, `pallets`, `lines` | `advance_ship_notice` to the client's store |
+| `RETURN_STATUS` | `rmaId`, `sellerReturnId`, `status` (IN_TRANSIT, DELIVERED), carrier, tracking number | `return_update` to the client |
+| `RETURN_RECEIVED` | `rmaId`, `sellerReturnId`, `nodeId`, `items` (`sellerSku`, `grade` SELLABLE, DAMAGED, DEFECTIVE or WRONG_ITEM, `quantity`) | refund decision and disposition; sellable units also arrive as an inventory receipt |
 | `SHIPMENT_FACT` | per package: units, cost, ground, air or `ltl`, final-mile miles, pallets for freight | reporting metrics |
 | `DISPOSITION_STATUS` | `rec_id`, `status` (completed, failed) | disposition tracking |
 | `HANDOFF_UPDATE` | `caseId`, `status` (ACKNOWLEDGED, COMPLETED), `result` | handoff tracking |
@@ -178,6 +206,12 @@ Store orders (B2B) ship whole cases from the region's inbound storage centre fir
 cannot fill are cut. Freight is booked a day ahead and goes LTL with a PRO number, 30 cases to a pallet, on
 a dock appointment inside the store's window (about 6% arrive a day or two late). The ship notice goes out
 when the truck leaves; delivery reads "Delivered to store receiving, POD signed".
+
+About 8% of Corp B's delivered web orders and 6% of Corp C's come back (settings `CORPB_RETURN_RATE`,
+`CORPC_RETURN_RATE` on the simulators): one item, asked for half a day to twelve days after delivery, and 3% too
+late. Corp A sends labels good for 14 days; 12% of consumers never ship. Parcels travel on ground transit times
+to the region's FC and are graded within two days: by reason, mostly sellable for "no longer needed", mostly
+damaged for "damaged in transit", mostly defective for "defective", with a few wrong items and empty boxes.
 
 Corp C places about 60 web orders a day (`corpcWebOrdersPerDay`). Its twelve stores sell from their shelves
 every day (about two thirds of Corp C's demand) and each orders once a week on its own weekday: every item

@@ -14,6 +14,7 @@ clients:
     name: Corp B
     promise_days: [2, 3]        # delivery promises the contract covers
     delivery_states: us48       # or a list, e.g. [CA, NV, OR, WA]
+    return_window_days: 30      # consumers may return within this many days of delivery (0: no returns)
     approvers:                  # who can approve each kind of Corp B decision
       distribution_plan: []
       replenishment: []
@@ -36,6 +37,7 @@ clients:
     promise_days: [3]
     online_protect_days: 7      # store orders never take the stock its web orders need for this many days
     store_lead_days: 2          # a store's delivery window must end at least this many days out
+    return_window_days: 30
     approvers:
       exception_resolution: []
     contacts:
