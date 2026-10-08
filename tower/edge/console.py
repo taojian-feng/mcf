@@ -3,6 +3,8 @@
   GET  /approvals?t=<link token>        everything this approver may decide, pending first
   GET  /approvals/{id}?t=<link token>   one request: what, why, the agent's numbers, approve / reject
   POST /approvals/{id}                  the decision (form: t, decision=approve|reject, reason)
+  GET  /ask?t=<link token>              the operator copilot: ask a question about your clients' work
+  POST /ask                             the question (form: t, q); the answer comes back on the page
 
 Approvers arrive from the signed link in their approval email (services/approval_links.py). The link
 says who they are; ApprovalService.decide checks their approver role and writes the audit ledger, so
@@ -14,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from html import escape
 from typing import Any
@@ -40,9 +44,13 @@ HEADERS = {
 }
 
 
+QUESTIONS_PER_HOUR = 30   # per person; each question is a few Claude calls
+
+
 class Console:
-    def __init__(self, approvals: ApprovalService, links: ApprovalLinks):
-        self.approvals, self.links = approvals, links
+    def __init__(self, approvals: ApprovalService, links: ApprovalLinks, copilot=None):
+        self.approvals, self.links, self.copilot = approvals, links, copilot
+        self._asked: dict[str, deque] = defaultdict(deque)
 
     def user(self, token: str) -> str | None:
         return self.links.verify(token) if token else None
@@ -51,7 +59,8 @@ class Console:
         items = self.approvals.visible_to(user)
         pending = [i for i in items if i.status == ApprovalStatus.PENDING]
         decided = [i for i in items if i.status != ApprovalStatus.PENDING][:20]
-        body = [f"<h1>Approvals</h1><p class=muted>Signed in as {escape(user)}</p>"]
+        body = [f"<h1>Approvals</h1><p class=muted>Signed in as {escape(user)}"
+                + (f" · <a href='/ask?t={quote(token)}'>Ask the tower</a>" if self.copilot else "") + "</p>"]
         body.append(f"<h2>Waiting for you ({len(pending)})</h2>")
         body.append(_rows(pending, token) if pending else "<p class=muted>Nothing is waiting. You're all caught up.</p>")
         if decided:
@@ -66,6 +75,8 @@ class Console:
             out.append(f"<p class=ok>{escape(notice)}</p>")
         if error:
             out.append(f"<p class=err>{escape(error)}</p>")
+        if item.brief:
+            out.append(_brief(item.brief))
         out.append("<dl>")
         out += [f"<dt>{k}</dt><dd>{v}</dd>" for k, v in [
             ("Why", escape(item.rationale)),
@@ -85,6 +96,38 @@ class Console:
             out.append(f"<p>{item.status.value.capitalize()} by {escape(item.decided_by or '')} "
                        f"on {_when(item.decided_at)}{reason}</p>")
         return _page(_title(item), "".join(out))
+
+    def ask_page(self, user: str, token: str, question: str = "", answer: dict[str, Any] | None = None,
+                 error: str = "") -> str:
+        out = [f"<p><a href='/approvals?t={quote(token)}'>&larr; Approvals</a></p><h1>Ask the tower</h1>",
+               "<p class=muted>Ask about your clients' orders, exceptions, handoffs, approvals, stock and returns. "
+               "The copilot only reads; it can't approve or change anything.</p>"]
+        if error:
+            out.append(f"<p class=err>{escape(error)}</p>")
+        if answer:
+            out.append(f"<section class=brief><p class=muted>{escape(question)}</p>"
+                       f"<div class=answer>{escape(answer['answer'])}</div>")
+            if answer.get("sources"):
+                used = sorted({s["tool"].replace("_", " ") for s in answer["sources"]})
+                out.append(f"<p class=muted>Looked at: {escape(', '.join(used))}. Written by Claude; check the "
+                           "records before acting on it.</p>")
+            out.append("</section>")
+        out.append(f"<form method=post action='/ask'><input type=hidden name=t value='{escape(token, quote=True)}'>"
+                   "<label for=q>Your question</label>"
+                   f"<textarea id=q name=q rows=3 maxlength=1000 placeholder='Why is order 1001 late?'>"
+                   f"{escape(question) if not answer else ''}</textarea>"
+                   "<div class=actions><button class=primary>Ask</button></div></form>")
+        return _page("Ask the tower", "".join(out))
+
+    def ask(self, user: str, question: str) -> dict[str, Any]:
+        q = self._asked[user]
+        now = time.monotonic()
+        while q and now - q[0] > 3600:
+            q.popleft()
+        if len(q) >= QUESTIONS_PER_HOUR:
+            raise ApprovalError(f"That's {QUESTIONS_PER_HOUR} questions this hour. Try again a little later.")
+        q.append(now)
+        return self.copilot.ask(user, question)
 
     def decide(self, user: str, approval_id: str, decision: str, reason: str) -> str:
         if decision not in ("approve", "reject"):
@@ -137,6 +180,28 @@ def create_app(console: Console) -> Starlette:
         done = "approved" if form.get("decision") == "approve" else "rejected"
         return RedirectResponse(f"/approvals/{quote(aid)}?t={quote(token)}&done={done}", 303, headers=HEADERS)
 
+    async def ask(request: Request) -> Response:
+        if request.method == "GET":
+            token = request.query_params.get("t", "")
+        else:
+            form = {k: v[0] for k, v in parse_qs((await request.body()).decode(errors="replace")).items()}
+            token = form.get("t", "")
+        user = console.user(token)
+        if not user:
+            return signed_out()
+        if console.copilot is None:
+            return html(_page("Not available", "<h1>The copilot isn't switched on here</h1>"), 404)
+        if request.method == "GET":
+            return html(console.ask_page(user, token))
+        question = form.get("q", "").strip()
+        if not question:
+            return html(console.ask_page(user, token, error="Type a question first."), 400)
+        try:
+            answer = await run_in_threadpool(console.ask, user, question)
+        except ApprovalError as e:
+            return html(console.ask_page(user, token, question, error=str(e)), 429)
+        return html(console.ask_page(user, token, question, answer))
+
     async def home(request: Request) -> Response:
         return html(_page("Approvals", "<h1>Control Tower approvals</h1>"
                           "<p>Open the link in your approval email to see what's waiting for you.</p>"))
@@ -148,6 +213,7 @@ def create_app(console: Console) -> Starlette:
         Route("/approvals", inbox),
         Route("/approvals/{approval_id}", detail, methods=["GET"]),
         Route("/approvals/{approval_id}", decide, methods=["POST"]),
+        Route("/ask", ask, methods=["GET", "POST"]),
     ])
 
 
@@ -188,6 +254,28 @@ def _content(content: dict[str, Any]) -> str:
     return f"<table class=kv>{''.join(rows)}</table>"
 
 
+SUGGESTION = {"approve": "Suggests approving", "reject": "Suggests rejecting", "look_closer": "Suggests a closer look"}
+
+
+def _brief(b: dict[str, Any]) -> str:
+    """The plain-language brief. It is advice: the approver decides, and the details below are the record."""
+    out = [f"<section class=brief><p>{escape(b.get('summary', ''))}</p><dl>",
+           f"<dt>If you approve</dt><dd>{escape(b.get('if_approved', ''))}</dd>",
+           f"<dt>If you reject</dt><dd>{escape(b.get('if_rejected', ''))}</dd>"]
+    for k in b.get("key_numbers") or []:
+        out.append(f"<dt>{escape(str(k.get('label', '')))}</dt><dd>{escape(str(k.get('value', '')))}</dd>")
+    out.append("</dl>")
+    if b.get("check_first"):
+        out.append("<p class=muted>Worth checking first:</p><ul>"
+                   + "".join(f"<li>{escape(c)}</li>" for c in b["check_first"]) + "</ul>")
+    if b.get("suggestion") in SUGGESTION:
+        out.append(f"<p><strong>{SUGGESTION[b['suggestion']]}</strong>: {escape(b.get('suggestion_reason', ''))}</p>")
+    who = "Written by Claude from this request and the tower's records" if b.get("source") == "claude" \
+        else "Written from this request's numbers"
+    out.append(f"<p class=muted>{who}. It is advice; you decide.</p></section>")
+    return "".join(out)
+
+
 def _form(approval_id: str, token: str) -> str:
     return (f"<form method=post action='/approvals/{quote(approval_id)}'>"
             f"<input type=hidden name=t value='{escape(token, quote=True)}'>"
@@ -209,6 +297,8 @@ h1{{font-size:22px;margin:8px 0}}h2{{font-size:16px;margin:28px 0 8px}}a{{color:
 .muted{{color:var(--muted)}}.ok{{color:var(--ok)}}.err{{color:var(--err)}}
 table{{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px}}
 th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}}
+.brief{{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:4px 14px;margin:16px 0}}
+.answer{{white-space:pre-wrap;margin:8px 0}}
 .kv th{{width:32%;color:var(--muted);font-weight:500}}pre{{margin:0;white-space:pre-wrap;font-size:13px}}
 dl{{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px}}dt{{color:var(--muted)}}dd{{margin:0}}
 .badge{{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}}
@@ -236,10 +326,18 @@ def main() -> None:
         raise SystemExit("the console needs MCF_CONSOLE_URL and a secret store")
     load = getattr(ports.directory, "pilot_config", None)
     config = load() if load else PilotConfig()
+    from tower.agents.copilot import Copilot
+    from tower.edge.connectors import load_catalogs
+
     audit = AuditService(ports.ledger, ports.blobs, ports.notifier, ports.clock)
     approvals = ApprovalService(ports.store, ports.bus, ports.directory, ports.notifier, audit, ports.clock, config,
                                 links=links)
-    uvicorn.run(create_app(Console(approvals, links)), host="0.0.0.0", port=int(os.environ.get("PORT", "8080")),
+    copilot = None
+    if ports.llm is not None:
+        from types import SimpleNamespace
+        load_catalogs(SimpleNamespace(config=config, ports=ports))   # which client owns which SKU
+        copilot = Copilot(ports.store, ports.ledger, ports.directory, audit, ports.clock, config, ports.llm)
+    uvicorn.run(create_app(Console(approvals, links, copilot)), host="0.0.0.0", port=int(os.environ.get("PORT", "8080")),
                 log_level="warning")
 
 

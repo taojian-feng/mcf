@@ -1,9 +1,15 @@
-# Runs the exception evaluation in Azure dev and shows its report on the run page.
-# Manual only: Actions > Run exception evaluation (dev) > Run workflow. Deploy first.
-name: Run exception evaluation (dev)
+# Runs an evaluation in Azure dev and shows its report on the run page.
+# Manual only: Actions > Run evaluation (dev) > Run workflow, then pick exceptions or copilot. Deploy first.
+name: Run evaluation (dev)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      eval:
+        description: Which evaluation
+        type: choice
+        options: [ exceptions, copilot ]
+        default: exceptions
 
 permissions:
   id-token: write   # GitHub OIDC token for azure/login
@@ -13,7 +19,8 @@ concurrency: { group: eval-azure-dev, cancel-in-progress: false }
 
 env:
   RG: ${{ vars.AZURE_RESOURCE_GROUP }}
-  JOB: mcfpilot-eval-exceptions
+  EVAL: ${{ inputs.eval || 'exceptions' }}
+  JOB: mcfpilot-eval-${{ inputs.eval || 'exceptions' }}
 
 jobs:
   eval:
@@ -45,9 +52,9 @@ jobs:
       - name: Show the report
         run: |
           account=$(az storage account list -g "$RG" --query "[?starts_with(name, 'mcfpilotst')] | [0].name" -o tsv)
-          name=$(az storage blob list --auth-mode login --account-name "$account" -c reports --prefix evals/exceptions- \
+          name=$(az storage blob list --auth-mode login --account-name "$account" -c reports --prefix "evals/$EVAL-" \
                    --query "sort_by([], &name)[-1].name" -o tsv)
-          [ -n "$name" ] && [[ "$name" > "evals/exceptions-$STARTED" ]] || { echo "::error::No new report in reports/evals/"; exit 1; }
+          [ -n "$name" ] && [[ "$name" > "evals/$EVAL-$STARTED" ]] || { echo "::error::No new report in reports/evals/"; exit 1; }
           az storage blob download --auth-mode login --account-name "$account" -c reports -n "$name" -f report.md -o none
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           cat report.md

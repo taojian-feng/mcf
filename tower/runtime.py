@@ -20,6 +20,7 @@ from tower.core.ports import (
 )
 from tower.services.approval import ApprovalService
 from tower.services.audit import AuditService
+from tower.services.briefs import BriefWriter
 from tower.services.governance import GovernanceService
 from tower.services.handoffs import HandoffService
 from tower.services.integration import IntegrationLayer
@@ -85,8 +86,9 @@ def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] |
                                    cache_ttl_s=config.authorization_list_cache_ttl.total_seconds())
     kw: dict[str, Any] = {"sleep": sleep} if sleep else {}
     integration = IntegrationLayer(ports.mcf, audit, ports.notifier, ports.blobs, ports.clock, config.retry, **kw)
+    briefs = BriefWriter(ports.store, ports.llm) if config.approval_briefs else None
     approvals = ApprovalService(ports.store, ports.bus, ports.directory, ports.notifier, audit, ports.clock, config,
-                                links=approval_links(ports))
+                                links=approval_links(ports), briefs=briefs)
     handoffs = HandoffService(ports.store, ports.bus, ports.directory, ports.notifier, audit, ports.clock, config)
     orchestration = OrchestrationAgent(ports.store, ports.bus, integration, governance, audit, handoffs,
                                        ports.clock, config)

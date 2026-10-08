@@ -88,7 +88,7 @@ class World:
 def build_world(*, catalog_size: int = 30, orders_per_day: int = 200, seed_a: int = 11, seed_b: int = 5,
                 llm: LLM | None = None, bad_record_rate: float = 0.05, corpc: bool = False,
                 corpc_size: int = 24, corpc_web_per_day: float = 60, seed_c: int = 7,
-                returns: bool = False, return_rate: float = 0.08) -> World:
+                returns: bool = False, return_rate: float = 0.08, briefs: bool = False) -> World:
     clock = VirtualClock(START)
     categories = ("exception_resolution", "disposition", "replenishment", "distribution_plan")
     roles = {"alice@corpb": {f"approver:{c}:corp_b" for c in categories}}
@@ -108,7 +108,7 @@ def build_world(*, catalog_size: int = 30, orders_per_day: int = 200, seed_a: in
     ports.bus.raise_errors = True
     wall = lambda: clock.now().timestamp()  # noqa: E731
 
-    config = PilotConfig(tenants=tenants)
+    config = PilotConfig(tenants=tenants, approval_briefs=briefs)
     gateway = Gateway(ports.bus, SECRETS.__getitem__, clock, wall=wall, tenants=lambda: config.tenants)
     gw = TestClient(gateway_app(gateway)).__enter__()  # one portal per client keeps requests cheap
 

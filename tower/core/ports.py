@@ -107,6 +107,11 @@ class LLM(Protocol):
     def structured(self, *, system: str, prompt: str, schema: type[T]) -> T | None:
         """Return a parsed schema instance, or None if the model declined / failed."""
 
+    def answer(self, *, system: str, question: str, tools: list[dict[str, Any]],
+               run_tool: Callable[[str, dict[str, Any]], str], max_turns: int = 8) -> str | None:
+        """Answer a question, calling read-only tools as needed (tools: name, description, input_schema).
+        run_tool returns the tool's result as text. None if the model failed or ran out of turns."""
+
 
 class MCFTransport(Protocol):
     """Raw transport to the Corp A MCF API. Raises MCFError on failure."""

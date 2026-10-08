@@ -205,6 +205,31 @@ class NullLLM:
     def structured(self, *, system: str, prompt: str, schema: type[BaseModel]):
         return None
 
+    def answer(self, *, system: str, question: str, tools, run_tool, max_turns: int = 8):
+        return None
+
+
+class ScriptedLLM(NullLLM):
+    """For tests: `answer` calls the scripted tools in order, then returns the scripted text (or a
+    function of the tool results). `structured` returns scripted outputs by schema name."""
+
+    def __init__(self, *, tool_calls: list[tuple[str, dict[str, Any]]] | None = None, answer_text: Any = "",
+                 structured_outputs: dict[str, Any] | None = None):
+        self.tool_calls, self.answer_text = tool_calls or [], answer_text
+        self.structured_outputs = structured_outputs or {}
+        self.seen: list[dict[str, Any]] = []
+
+    def structured(self, *, system: str, prompt: str, schema: type[BaseModel]):
+        self.seen.append({"system": system, "prompt": prompt})
+        out = self.structured_outputs.get(schema.__name__)
+        return schema.model_validate(out) if isinstance(out, dict) else out
+
+    def answer(self, *, system: str, question: str, tools, run_tool, max_turns: int = 8):
+        results = [run_tool(name, args) for name, args in self.tool_calls]
+        self.seen.append({"system": system, "question": question, "tools": [t["name"] for t in tools],
+                          "results": results})
+        return self.answer_text(results) if callable(self.answer_text) else self.answer_text
+
 
 class FakeMCF:
     """Scriptable stand-in for the Corp A MCF API.

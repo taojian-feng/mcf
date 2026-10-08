@@ -150,6 +150,14 @@ The console checks your approver role from the people file and records every dec
 The console scales to zero when idle, so the first click after a quiet spell takes a few seconds. To revoke every
 link at once, change the `approval-link-key` secret in Key Vault and restart the `mcfpilot-all` app.
 
+Each request opens with a short brief: what is asked, what happens if you approve or reject, the key numbers,
+and a suggestion when Claude wrote it. It is advice; you decide.
+
+From the inbox, **Ask the tower** opens the operator copilot. Ask in plain words ("Why is order 1001 late?",
+"What is waiting on Corp A?") and Claude answers from the tower's records. It sees only the clients your
+approver roles cover, it cannot change anything, and every question is recorded in the audit ledger. It needs
+Claude; without it the page says so.
+
 ### Partners: Corp A, Corp B and Corp C
 
 The deploy runs every partner company as a simulator, each in its own Container App with its own identity and
@@ -202,8 +210,9 @@ meantime use the same model straight from Anthropic:
 
 When `anthropic-api-key` is present it is used; delete the secret to go back to Foundry once quota arrives.
 
-To check how Claude does before relying on it, run the GitHub Actions workflow **Run exception evaluation (dev)**,
-which starts the job, waits for it and shows the report on the run page. Or start the job yourself:
+To check how Claude does before relying on it, run the GitHub Actions workflow **Run evaluation (dev)** and
+pick `exceptions` or `copilot`. It starts the job, waits for it and shows the report on the run page. Or start
+the job yourself:
 
 ```bash
 az containerapp job start -g mcfpilot-dev-rg -n mcfpilot-eval-exceptions
@@ -213,6 +222,12 @@ It replays two simulated weeks of orders in memory and scores four ways of class
 against what really happened: rules only, rules with Claude for ambiguous cases (what production runs), Claude
 alone, and Claude with the order's history. The report is emailed to the ops contact and kept in the `reports`
 container under `evals/`. Run it locally without Claude with `python -m evals.exceptions --days 7`.
+
+The copilot evaluation (`mcfpilot-eval-copilot`) runs 16 simulated days with Corp B, Corp C and returns, then
+asks the copilot 11 questions as a Corp B, a Corp C and a Corp A person. Each answer is checked against the
+records (a count, an order's state, a stock total), and two questions check the limits: another client's order
+stays hidden, and asking it to approve changes nothing. Expect a dollar or two in tokens; the report states the
+exact cost. See the questions without Claude with `python -m evals.copilot --dry-run`.
 
 To turn Claude off, deploy with `enableClaude=false`.
 
