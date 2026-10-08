@@ -105,6 +105,7 @@ class PilotConfig(BaseModel):
             "dispose_return": OwningParty.CORP_A,
         }
     )
+    approval_briefs: bool = True     # a plain-language brief on every approval (Claude when configured)
     handoff_ack_window: timedelta = timedelta(hours=4)
     handoff_default_due: timedelta = timedelta(hours=24)
 

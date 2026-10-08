@@ -325,6 +325,7 @@ class ApprovalItem(BaseModel):
     decided_at: datetime | None = None
     reason: str | None = None
     reminders_sent: int = 0
+    brief: dict[str, Any] | None = None   # plain-language note for the approver (services/briefs.py); advice only
 
 
 # ---------------------------------------------------------------- handoffs (R11)

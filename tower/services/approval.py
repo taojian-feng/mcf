@@ -12,6 +12,7 @@ from tower.core.tenants import TENANT_ONE, party_key
 
 from .approval_links import ApprovalLinks
 from .audit import AuditService
+from .briefs import BriefWriter
 
 COLLECTION = "approvals"
 GOVERNANCE_OWNER = "pilot_governance_owner"
@@ -32,10 +33,11 @@ class ApprovalError(Exception):
 
 class ApprovalService:
     def __init__(self, store: DocumentStore, bus: MessageBus, directory: Directory, notifier: Notifier,
-                 audit: AuditService, clock: Clock, config: PilotConfig, links: ApprovalLinks | None = None):
+                 audit: AuditService, clock: Clock, config: PilotConfig, links: ApprovalLinks | None = None,
+                 briefs: BriefWriter | None = None):
         self.store, self.bus, self.directory = store, bus, directory
         self.notifier, self.audit, self.clock, self.config = notifier, audit, clock, config
-        self.links = links
+        self.links, self.briefs = links, briefs
         bus.subscribe(topics.TIMERS, self._on_timer, subscription="approval-workflow")
 
     def get(self, approval_id: str) -> ApprovalItem:
@@ -64,9 +66,12 @@ class ApprovalService:
                             originating_agent=agent, subject_id=subject_id, content=content, rationale=rationale,
                             created_at=self.clock.now())
         item.routed_to = self.directory.principals_with_role(approver_role(category, owning_party, tenant_id))
+        if self.briefs is not None:
+            item.brief = self.briefs.write(item)
         self._save(item)
         self.audit.decision(agent, "approval_requested", rationale=rationale, subject_id=item.approval_id,
-                            result={"category": category.value, "routed_to": item.routed_to},
+                            result={"category": category.value, "routed_to": item.routed_to,
+                                    "brief": (item.brief or {}).get("source")},
                             owning_party=owning_party, tenant_id=tenant_id, **_ids(content))
         if item.routed_to:
             for approver in item.routed_to:
@@ -135,6 +140,13 @@ class ApprovalService:
         lines = [f"The {item.originating_agent.replace('_', ' ')} asks for your approval.", "",
                  f"What: {_title(item)}", f"Why: {item.rationale}",
                  f"Owner: {owner_label(item)}", f"Requested: {item.created_at:%Y-%m-%d %H:%M} UTC", ""]
+        b = item.brief
+        if b:
+            lines += ["In short: " + b["summary"], "If you approve: " + b["if_approved"],
+                      "If you reject: " + b["if_rejected"]]
+            if b.get("suggestion"):
+                lines.append(f"Suggested: {b['suggestion'].replace('_', ' ')}. {b.get('suggestion_reason', '')}".rstrip())
+            lines.append("")
         if self.links and "@" in recipient:
             lines += ["Approve or reject it here:", self.links.item_url(recipient, item.approval_id), "",
                       "All approvals waiting for you:", self.links.inbox_url(recipient), "",

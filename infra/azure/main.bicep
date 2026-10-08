@@ -547,6 +547,34 @@ resource evalJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
   dependsOn: [ roleAcr ]
 }
 
+// Copilot evaluation: runs the world with both clients and returns, then asks the operator copilot questions whose
+// answers it can check. Started by hand like the job above: az containerapp job start -g <rg> -n <prefix>-eval-copilot.
+resource evalCopilotJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
+  name: '${prefix}-eval-copilot'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
+  properties: {
+    environmentId: cae.id
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 3600
+      replicaRetryLimit: 0
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: registries
+    }
+    template: {
+      containers: [ {
+        name: 'eval'
+        image: image
+        command: [ 'python', '-m', 'evals.copilot' ]
+        resources: { cpu: json('1.0'), memory: '2Gi' }
+        env: commonEnv
+      } ]
+    }
+  }
+  dependsOn: [ roleAcr ]
+}
+
 // ------------------------------------------------------------------ Partner gateway and partner simulators
 
 // Front door for Corp B orders and Corp A webhooks. Authenticates partners and publishes to the bus.

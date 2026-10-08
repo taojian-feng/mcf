@@ -384,6 +384,33 @@ class FoundryClaude:
             return None
         return resp.parsed_output
 
+    def answer(self, *, system: str, question: str, tools: list[dict[str, Any]], run_tool, max_turns: int = 8):
+        """A manual tool loop: the tools only read, and each result goes back as text."""
+        import anthropic
+        messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
+        try:
+            for _ in range(max_turns):
+                resp = self._client.messages.create(model=self.model, max_tokens=16000, system=system,
+                                                    tools=tools, messages=messages)
+                with self._count:
+                    self.calls += 1
+                    self.input_tokens += resp.usage.input_tokens
+                    self.output_tokens += resp.usage.output_tokens
+                if resp.stop_reason == "end_turn":
+                    return "".join(b.text for b in resp.content if b.type == "text").strip() or None
+                if resp.stop_reason != "tool_use":
+                    self._log.warning("copilot stopped with %s", resp.stop_reason)
+                    return None
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": b.id, "content": run_tool(b.name, dict(b.input))}
+                    for b in resp.content if b.type == "tool_use"]})
+        except anthropic.APIError as e:
+            self._log.warning("copilot call failed: %s", e)
+            return None
+        self._log.warning("copilot ran out of turns")
+        return None
+
 
 class AnthropicClaude(FoundryClaude):
     """The same model straight from Anthropic's API, for subscriptions where Foundry has no Claude quota.
