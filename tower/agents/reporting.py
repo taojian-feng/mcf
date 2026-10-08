@@ -70,7 +70,7 @@ class ReportingAgent:
         shipped_ids = {o["order_id"] for o in orders
                        if any(t["state"] == "shipped" and t["at"][:10] == day.isoformat() for t in o["transitions"])}
         facts = [f for f in self.store.query(FACTS) if f["shipped_on"] == day.isoformat() and f.get("order_id") in mine]
-        on_hand = sum(s["on_hand"] for s in self.store.query(INVENTORY_STATE))
+        on_hand = sum(s["on_hand"] for s in self.store.query(INVENTORY_STATE) if s["sku"] in self.config.pilot_upcs)
 
         metrics: dict[str, dict[str, Any]] = {}
         metrics.update(self._delivery_metrics(delivered))
@@ -134,7 +134,7 @@ class ReportingAgent:
 
     def _turns(self, day: date, on_hand: int) -> dict[str, Any]:
         picks = [e for e in self.store.query(INVENTORY_EVENTS, type=InventoryEventType.PICK.value)
-                 if e["occurred_at"][:10] == day.isoformat()]
+                 if e["occurred_at"][:10] == day.isoformat() and e["sku"] in self.config.pilot_upcs]
         if on_hand <= 0:
             return _m(None, status="incomplete", missing_source="inventory state (Reconciliation_Agent)")
         return _m(sum(e["quantity"] for e in picks) * 365 / on_hand)

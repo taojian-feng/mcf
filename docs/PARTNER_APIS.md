@@ -1,7 +1,7 @@
-# Partner APIs: how Corp A, Corp B and the Control Tower talk
+# Partner APIs: how Corp A, its retail clients and the Control Tower talk
 
-The Control Tower sits between two companies. In the dev environment both companies are simulated, but
-each runs as its own service with its own identity and its own database, and talks to the system
+The Control Tower sits between Corp A and the retailers it serves: Corp B (online only) and Corp C (a
+website and twelve stores). In the dev environment every company is simulated, but each runs as its own service with its own identity and its own database, and talks to the system
 only over HTTPS, exactly as a real partner would. Swapping a simulator for the real partner means
 pointing a URL somewhere else and exchanging real credentials; no agent code changes.
 
@@ -10,6 +10,10 @@ flowchart LR
   subgraph CorpB[Corp B - retailer]
     OMS[Order management]
     FILES[Planning files]
+  end
+  subgraph CorpC[Corp C - retailer with stores]
+    WEB[Website]
+    STORES[12 stores]
   end
   subgraph CT[Control Tower - ours]
     GW[Partner gateway]
@@ -31,6 +35,9 @@ flowchart LR
   WH -- signed webhooks --> GW
   AG --> CON
   CON -- order updates --> OMS
+  WEB -- POST /v1/orders --> GW
+  STORES -- POST /v1/store-orders --> GW
+  CON -- allocations, ship notices --> STORES
   CON -- cases --> API
 ```
 
@@ -42,6 +49,8 @@ flowchart LR
 | `partner-corpa-webhook-secret` | Corp A signs webhooks | tower gateway verifies |
 | `partner-corpb-api-key` | Corp B order management | tower gateway (`X-Api-Key`) |
 | `corpb-inbound-api-key` | tower connectors | Corp B endpoints (`X-Api-Key`) |
+| `partner-corpc-api-key` | Corp C website and stores | tower gateway (`X-Api-Key`) |
+| `corpc-inbound-api-key` | tower connectors | Corp C endpoints (`X-Api-Key`) |
 
 To rotate one, set a new value in Key Vault; the system picks it up within five minutes and the
 simulators on their next restart.
@@ -80,6 +89,38 @@ with `X-Api-Key`. Body: `{"event_id", "type", "payload", "occurred_at"}`. Types 
 `order_rejected`, `tracking_update`, `delay`, `delivery_failed`, `reship`, `cancellation` and
 `decant_counts`. Corp B answers `2xx`; anything else is retried, then dead-lettered.
 
+## Corp C to the Control Tower
+
+Corp C's website sends consumer orders to `POST {gateway}/v1/orders` exactly as Corp B does (3-day promise
+only). Its catalog goes to `corpc/catalog/`; each record also has `case_pack`.
+
+Its stores send replenishment orders to `POST {gateway}/v1/store-orders` with `X-Api-Key`, only allowed for
+clients whose contract lists the `store` channel (else `403`):
+
+```json
+{"order_id": "CCS-ST-0101-261008", "placed_at": "2026-10-08T06:10:00+00:00",
+ "store_id": "ST-0101", "store_name": "Corp C Seattle Northgate",
+ "ship_to": {"line1": "401 NE Northgate Way", "city": "Seattle", "state": "WA", "postal_code": "98101", "country": "US"},
+ "window_start": "2026-10-11", "window_end": "2026-10-14",
+ "lines": [{"line_id": "1", "upc": "650000000012", "cases": 4, "case_pack": 6}]}
+```
+
+`422` when the window is backwards, ends sooner than the contract's `store_lead_days`, a line has no cases, or
+line ids repeat. Corp A sees the order as `CORPC-<order_id>`.
+
+**Allocation.** Web and store orders share Corp C's stock. Before a store order goes to Corp A, each line is cut
+to what Corp C can spare: on hand across the network, minus units held by open orders, minus a web reserve
+(the last 14 days' web demand per day times `online_protect_days`), in whole cases. The store hears the result
+first as `store_order_allocated`; if no line gets a case the order is `order_rejected` with the numbers.
+
+## Control Tower to Corp C
+
+`POST {corpc}/oms/v1/events`, same envelope as Corp B. Store orders get `store_order_allocated` (per line:
+`cases_ordered`, `cases_allocated`, `short_cases`, `available_units`, `web_reserve_units`),
+`advance_ship_notice` (`asnId`, `carrier`, `proNumber`, `billOfLading`, `appointment`, `pallets`, and per line
+`sellerSku`, `casesShipped`, `unitsShipped`) and `tracking_update` with `store_id`. Web orders get the same
+updates as Corp B's.
+
 ## Control Tower to Corp A (the MCF API)
 
 `POST {corpa}/oauth2/token` with `grant_type=client_credentials`, `client_id`, `client_secret`
@@ -87,7 +128,7 @@ returns a bearer token valid for an hour. Then:
 
 | Operation | Method and path |
 |---|---|
-| CreateFulfillmentOrder | `POST /mcf/v1/fulfillment-orders` (202; same id and items again is a no-op; different items 409) |
+| CreateFulfillmentOrder | `POST /mcf/v1/fulfillment-orders` (202; same id and items again is a no-op; different items 409). Store orders add `orderType: B2B`, `shippingSpeedCategory: Freight`, `deliveryWindow {start, end}`, `casePack` per item and `storeId` on the address |
 | GetFulfillmentOrder | `GET /mcf/v1/fulfillment-orders/{id}` (status, shipments, `estimatedArrivalDate`) |
 | FulfillmentOrderStatus | `GET /mcf/v1/fulfillment-orders/{id}/status` |
 | GetFulfillmentPreview | `POST /mcf/v1/fulfillment-orders/preview` |
@@ -114,7 +155,8 @@ Corp A retries until it gets a `2xx`, for up to 72 hours; duplicates are dropped
 | `ORDER_STATUS_CHANGE` | `sellerFulfillmentOrderId`, `status` (ACCEPTED, PROCESSING, PACKED, SHIPPED, OUT_FOR_DELIVERY, DELIVERED, CANCELLED, UNFULFILLABLE), `statusTime`, `estimatedArrivalDate` | order lifecycle; UNFULFILLABLE also opens an exception |
 | `TRACKING_UPDATE` | package, carrier, tracking number, `status`, recent scan `events` | tracking to Corp B; LOST, UNDELIVERABLE and DAMAGED scans open exceptions |
 | `INVENTORY_EVENTS` | `events`: receipt, pick, transfer, decant, adjustment, removal, physical_count | inventory ledger and reconciliation |
-| `SHIPMENT_FACT` | per package: units, cost, ground or air, final-mile miles | reporting metrics |
+| `ADVANCE_SHIP_NOTICE` | store freight: `sellerFulfillmentOrderId`, `asnId`, carrier, PRO number, bill of lading, dock `appointment`, `pallets`, `lines` | `advance_ship_notice` to the client's store |
+| `SHIPMENT_FACT` | per package: units, cost, ground, air or `ltl`, final-mile miles, pallets for freight | reporting metrics |
 | `DISPOSITION_STATUS` | `rec_id`, `status` (completed, failed) | disposition tracking |
 | `HANDOFF_UPDATE` | `caseId`, `status` (ACKNOWLEDGED, COMPLETED), `result` | handoff tracking |
 
@@ -131,3 +173,13 @@ distance. About 4% of parcels run late, 1.5% need a second delivery attempt, 0.4
 in each inbound storage centre, vendor deliveries arrive Mondays, transfers take carrier days, a
 nightly count of every position occasionally finds shrink (booked as an adjustment that morning),
 and its ops team works cases within 1 to 18 hours, now and then later than promised.
+
+Store orders (B2B) ship whole cases from the region's inbound storage centre first, then the FCs; lines it
+cannot fill are cut. Freight is booked a day ahead and goes LTL with a PRO number, 30 cases to a pallet, on
+a dock appointment inside the store's window (about 6% arrive a day or two late). The ship notice goes out
+when the truck leaves; delivery reads "Delivered to store receiving, POD signed".
+
+Corp C places about 60 web orders a day (`corpcWebOrdersPerDay`). Its twelve stores sell from their shelves
+every day (about two thirds of Corp C's demand) and each orders once a week on its own weekday: every item
+below one and a half weeks of cover is ordered up to three weeks, in whole cases, for delivery three to six
+days out. Delivered cases go onto the store's shelves.

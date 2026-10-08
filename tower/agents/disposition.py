@@ -42,6 +42,8 @@ class DispositionAgent:
         evaluations = []
         for st in self.store.query(STATE):
             sku, node = st["sku"], st["node_id"]
+            if sku not in self.config.pilot_upcs:
+                continue  # aging and disposition run for tenant one's stock so far
             lots = [(lot["qty"], (now - datetime.fromisoformat(lot["received_at"])).days) for lot in st["lots"]
                     if lot["qty"] > 0]
             if not lots:

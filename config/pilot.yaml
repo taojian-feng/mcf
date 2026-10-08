@@ -30,6 +30,17 @@ clients:
       review: ""                # weekly and quarterly summaries
     can_see_insight_data: []    # extra people allowed to see this client's sales and forecasts
 
+  corp_c:                       # a home goods chain: a website and twelve stores
+    name: Corp C
+    channels: [online, store]   # store = weekly case orders from its stores, by freight
+    promise_days: [3]
+    online_protect_days: 7      # store orders never take the stock its web orders need for this many days
+    store_lead_days: 2          # a store's delivery window must end at least this many days out
+    approvers:
+      exception_resolution: []
+    contacts:
+      ops: ""
+
   # Add the next client like this (its gateway key goes in Key Vault as partner-<id without _>-api-key):
   # retailer_two:
   #   name: Retailer Two

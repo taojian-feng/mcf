@@ -85,11 +85,45 @@ class ConsumerOrder(BaseModel):
     client_order_id: str | None = None
 
 
+class StoreOrderLine(BaseModel):
+    line_id: str
+    upc: str
+    cases: int = Field(gt=0)
+    case_pack: int = Field(gt=0)   # units per case; stores order and receive whole cases
+
+    @property
+    def units(self) -> int:
+        return self.cases * self.case_pack
+
+
+class StoreOrder(BaseModel):
+    """A store replenishment order from a client's store system (offline channel, B2B freight).
+
+    Cases go to the store's receiving dock on a pallet, by truck, inside the store's delivery window.
+    A store address is a business address, not personal data."""
+    order_id: str
+    placed_at: datetime
+    store_id: str
+    store_name: str
+    ship_to: Address
+    window_start: date
+    window_end: date
+    lines: list[StoreOrderLine]
+    tenant_id: str = "corp_b"
+    client_order_id: str | None = None
+
+
 class OrderRecord(BaseModel):
     """Order lifecycle record owned by the Orchestration agent. Holds no raw PII."""
     order_id: str                      # fulfillment id
     tenant_id: str = "corp_b"
     client_order_id: str | None = None
+    channel: str = "online"            # online: parcels to a consumer; store: cases to a store by freight
+    store_id: str | None = None
+    ship_to: dict[str, Any] | None = None  # store orders: the store's dock address (a business, not PII)
+    window_start: date | None = None   # store orders: the store's delivery window (promised_by = its end)
+    allocation: list[dict[str, Any]] = Field(default_factory=list)  # store orders: cases asked, cases sent
+    ship_notices: list[dict[str, Any]] = Field(default_factory=list)
     placed_at: datetime
     promised_by: date
     delivery_promise_days: int

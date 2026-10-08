@@ -2,6 +2,8 @@
 
   POST /v1/orders              A client's order management sends consumer orders (X-Api-Key). The key
                                says which client is calling; the order is stamped with that tenant.
+  POST /v1/store-orders        A client's store system sends store replenishment orders (cases, delivery
+                               window), for clients whose contract includes stores.
   POST /v1/mcf/notifications   Corp A pushes order status, tracking, inventory, shipment facts,
                                disposition results and case updates (X-MCF-Signature: HMAC-SHA256).
 
@@ -29,7 +31,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tower.core import topics
-from tower.core.models import ConsumerOrder, UnhappyPathSignal
+from tower.core.models import ConsumerOrder, StoreOrder, UnhappyPathSignal
 from tower.core.ports import Clock, Event, MessageBus
 from tower.core.tenants import Tenant, default_tenants
 
@@ -86,20 +88,29 @@ class Gateway:
                 found = found or t
         return found
 
-    def receive_order(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _caller(self, api_key: str, body: Any, channel: str) -> tuple[Tenant, dict[str, Any]]:
         tenant = self.tenant_for(api_key) if api_key else None
         if tenant is None:
             raise GatewayError(401, "invalid API key")
         if not tenant.active:
             raise GatewayError(403, f"client {tenant.tenant_id} is not active")
+        if channel not in tenant.channels:
+            raise GatewayError(403, f"client {tenant.tenant_id} has no {channel} orders in its contract")
         if not isinstance(body, dict):
             raise GatewayError(422, "order failed validation", ["body: must be a JSON object"])
-        body = {k: v for k, v in body.items() if k not in ("tenant_id", "client_order_id")}  # never from the caller
+        return tenant, {k: v for k, v in body.items() if k not in ("tenant_id", "client_order_id")}  # never from the caller
+
+    @staticmethod
+    def _parse(model, body: dict[str, Any]):
         try:
-            order = ConsumerOrder.model_validate(body)
+            return model.model_validate(body)
         except ValidationError as ve:
             raise GatewayError(422, "order failed validation",
                                [f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in ve.errors()]) from ve
+
+    def receive_order(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
+        tenant, body = self._caller(api_key, body, "online")
+        order = self._parse(ConsumerOrder, body)
         if order.delivery_promise_days not in tenant.promise_days:
             raise GatewayError(422, "order failed validation",
                                [f"delivery_promise_days: the contract covers {tenant.promise_days} days"])
@@ -107,6 +118,25 @@ class Gateway:
         order = order.model_copy(update={"tenant_id": tenant.tenant_id, "client_order_id": client_id,
                                          "order_id": tenant.fulfillment_id(client_id)})
         self.bus.publish(Event(topics.ORDERS_RECEIVED, "order_received", order.model_dump(mode="json"),
+                               self.clock.now(), event_id=f"ord_{order.order_id}", correlation_id=order.order_id))
+        return {"accepted": True, "order_id": client_id}
+
+    def receive_store_order(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
+        tenant, body = self._caller(api_key, body, "store")
+        order = self._parse(StoreOrder, body)
+        problems = []
+        if order.window_end < order.window_start:
+            problems.append("window_end: before window_start")
+        if (order.window_end - order.placed_at.date()).days < tenant.store_lead_days:
+            problems.append(f"window_end: the contract needs at least {tenant.store_lead_days} days' notice")
+        if len({ln.line_id for ln in order.lines}) != len(order.lines):
+            problems.append("lines: line_id must be unique")
+        if problems:
+            raise GatewayError(422, "order failed validation", problems)
+        client_id = order.order_id
+        order = order.model_copy(update={"tenant_id": tenant.tenant_id, "client_order_id": client_id,
+                                         "order_id": tenant.fulfillment_id(client_id)})
+        self.bus.publish(Event(topics.ORDERS_RECEIVED, "store_order_received", order.model_dump(mode="json"),
                                self.clock.now(), event_id=f"ord_{order.order_id}", correlation_id=order.order_id))
         return {"accepted": True, "order_id": client_id}
 
@@ -163,6 +193,15 @@ class Gateway:
                        f"{ev.get('sku')}|{ev.get('node_id')}" if ok else None)
         return len(events)
 
+    def _n_advance_ship_notice(self, nid: str, p: dict[str, Any]) -> int:
+        """Freight left for a store: what is on the truck (cases, pallets), the carrier's PRO number, the
+        dock appointment. It becomes the ship notice the client's store receives against."""
+        order_id = p["sellerFulfillmentOrderId"]
+        self._emit(topics.ORDERS_LIFECYCLE, "ship_notice", {"order_id": order_id, **{k: p.get(k) for k in (
+            "asnId", "carrier", "proNumber", "billOfLading", "appointment", "pallets", "lines", "shippedAt")}},
+                   nid, order_id)
+        return 1
+
     def _n_shipment_fact(self, nid: str, p: dict[str, Any]) -> int:
         self._emit(topics.SHIPMENT_FACTS, "shipment_fact", p, nid, p.get("order_id"))
         return 1
@@ -198,6 +237,13 @@ def create_app(gateway: Gateway) -> Starlette:
             return JSONResponse({"error": "body is not JSON"}, 400)
         return await _run(gateway.receive_order, request.headers.get("x-api-key", ""), body)
 
+    async def store_orders(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "body is not JSON"}, 400)
+        return await _run(gateway.receive_store_order, request.headers.get("x-api-key", ""), body)
+
     async def notifications(request: Request) -> JSONResponse:
         return await _run(gateway.receive_notification, request.headers.get("x-mcf-signature", ""),
                           await request.body())
@@ -214,6 +260,7 @@ def create_app(gateway: Gateway) -> Starlette:
         Route("/healthz", lambda r: JSONResponse({"ok": True, "service": "mcf-gateway",
                                                   "time": datetime.now(timezone.utc).isoformat()})),
         Route("/v1/orders", orders, methods=["POST"]),
+        Route("/v1/store-orders", store_orders, methods=["POST"]),
         Route("/v1/mcf/notifications", notifications, methods=["POST"]),
     ])
 

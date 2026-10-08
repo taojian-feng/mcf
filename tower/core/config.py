@@ -146,6 +146,12 @@ class PilotConfig(BaseModel):
         tid = tenant_id or TENANT_ONE
         return self.pilot_upcs if tid == TENANT_ONE else self.tenant_upcs.get(tid, set())
 
+    def tenant_of_sku(self, sku: str) -> str | None:
+        """Whose item this is: each client owns its own stock (clients list different UPCs)."""
+        if sku in self.pilot_upcs:
+            return TENANT_ONE
+        return next((t for t, upcs in self.tenant_upcs.items() if sku in upcs), None)
+
     def states_for(self, tenant_id: str | None) -> set[str]:
         t = self.tenant(tenant_id)
         return t.eligible_states if t and t.eligible_states else self.eligible_states

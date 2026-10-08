@@ -116,6 +116,8 @@ jobs:
           seed partner-corpa-webhook-secret "$(openssl rand -hex 32)"
           seed partner-corpb-api-key "$(openssl rand -hex 24)"
           seed corpb-inbound-api-key "$(openssl rand -hex 24)"
+          seed partner-corpc-api-key "$(openssl rand -hex 24)"
+          seed corpc-inbound-api-key "$(openssl rand -hex 24)"
           seed approval-link-key "$(openssl rand -hex 32)"   # signs the console links in approval emails
 
       - name: Deploy infrastructure and the new images
@@ -130,6 +132,7 @@ jobs:
             echo "UAMI_NAME=$(out agentsIdentityName)"; echo "UAMI_CLIENT_ID=$(out agentsIdentityClientId)"
             echo "CONSOLE_URL=$(out consoleUrl)";      echo "FOUNDRY_RESOURCE=$(out foundryResource)"
             echo "GATEWAY_URL=$(out gatewayUrl)";      echo "CORPA_URL=$(out corpaUrl)"; echo "CORPB_URL=$(out corpbUrl)"
+            echo "CORPC_URL=$(out corpcUrl)"
           } >> "$GITHUB_ENV"
 
       - name: Seed pilot settings and sync people from config/pilot.yaml
@@ -173,7 +176,7 @@ jobs:
       - name: Smoke test (console and partners answer, reconciliation job runs)
         if: ${{ inputs.smoke_test }}
         run: |
-          for url in "$CONSOLE_URL" "$GATEWAY_URL" "$CORPA_URL" "$CORPB_URL"; do
+          for url in "$CONSOLE_URL" "$GATEWAY_URL" "$CORPA_URL" "$CORPB_URL" "$CORPC_URL"; do
             [ -n "$url" ] || continue
             for i in $(seq 1 30); do curl -fsS "$url/healthz" && echo && break; sleep 10; done
             curl -fsS "$url/healthz" >/dev/null || { echo "::error::$url/healthz is not answering"; exit 1; }
@@ -200,6 +203,6 @@ jobs:
             echo "- Resource group: \`$RG\`"
             echo "- Images: \`${IMAGE:-not built}\`, \`${SIM_IMAGE:-not built}\`"
             if [ -n "${CONSOLE_URL:-}" ]; then echo "- Approval console: $CONSOLE_URL (open it from the link in an approval email)"; fi
-            if [ -n "${GATEWAY_URL:-}" ]; then echo "- Partner gateway: $GATEWAY_URL (Corp A MCF API: $CORPA_URL, Corp B OMS: $CORPB_URL)"; fi
+            if [ -n "${GATEWAY_URL:-}" ]; then echo "- Partner gateway: $GATEWAY_URL (Corp A MCF API: $CORPA_URL, Corp B OMS: $CORPB_URL, Corp C OMS: $CORPC_URL)"; fi
             if [ -n "${FOUNDRY_RESOURCE:-}" ]; then echo "- Claude: Foundry resource \`$FOUNDRY_RESOURCE\`. Deploy the model \`claude-opus-5-5\` there once in ai.azure.com (docs/DEPLOY_AZURE.md, Claude)"; fi
           } >> "$GITHUB_STEP_SUMMARY"

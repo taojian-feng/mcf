@@ -19,10 +19,12 @@ param serviceBusSku string = 'Standard'
 param agentApps array = [ 'all' ]
 @description('Partner simulators image (sim/Dockerfile). The first deploy uses the public placeholder.')
 param simImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
-@description('Run the Corp A and Corp B simulators, the partner gateway, and call Corp A over HTTPS. Off: an in-process fake MCF API and no partner traffic.')
+@description('Run the Corp A, Corp B and Corp C simulators, the partner gateway, and call Corp A over HTTPS. Off: an in-process fake MCF API and no partner traffic.')
 param enablePartners bool = true
 @description('Average consumer orders per day that the Corp B simulator places.')
 param corpbOrdersPerDay string = '140'
+@description('Average web orders per day that the Corp C simulator places (its twelve stores order weekly on top).')
+param corpcWebOrdersPerDay string = '60'
 @description('Audit database size. S0 (~$15/month) never pauses and easily takes the pilot load; GP_S_Gen5_2 is serverless, which only saves money while idle.')
 @allowed([ 'S0', 'S1', 'GP_S_Gen5_2' ])
 param sqlSku string = 'S0'
@@ -181,13 +183,13 @@ resource cosmosContainers 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/co
 }]
 
 // Each simulated partner keeps its own state in its own database, reachable only by its own identity.
-resource partnerDbs 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = [for p in [ 'corpa', 'corpb' ]: if (enablePartners) {
+resource partnerDbs 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = [for p in [ 'corpa', 'corpb', 'corpc' ]: if (enablePartners) {
   parent: cosmos
   name: p
   properties: { resource: { id: p } }
 }]
 
-resource partnerState 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = [for (p, i) in [ 'corpa', 'corpb' ]: if (enablePartners) {
+resource partnerState 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = [for (p, i) in [ 'corpa', 'corpb', 'corpc' ]: if (enablePartners) {
   parent: partnerDbs[i]
   name: 'state'
   properties: { resource: { id: 'state', partitionKey: { paths: [ '/id' ], kind: 'Hash' } } }
@@ -386,6 +388,7 @@ var commonEnv = concat(baseEnv, [ { name: 'MCF_CONSOLE_URL', value: consoleUrl }
   { name: 'MCF_API_MODE', value: 'live' }
   { name: 'MCF_API_BASE_URL', value: 'https://${corpaApp!.properties.configuration.ingress.fqdn}' }
   { name: 'MCF_CORPB_URL', value: 'https://${corpbApp!.properties.configuration.ingress.fqdn}' }
+  { name: 'MCF_CORPC_URL', value: 'https://${corpcApp!.properties.configuration.ingress.fqdn}' }
 ] : [ { name: 'MCF_API_MODE', value: 'sandbox' } ])
 // ------------------------------------------------------------------ Email (Azure Communication Services)
 
@@ -578,6 +581,11 @@ resource corpbId 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' =
   location: location
 }
 
+resource corpcId 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (enablePartners) {
+  name: '${prefix}-corpc-id'
+  location: location
+}
+
 // Corp A: the MCF API and the fulfillment network behind it. One replica: it is the single writer of its inventory.
 resource corpaApp 'Microsoft.App/containerApps@2024-03-01' = if (enablePartners) {
   name: '${prefix}-corpa-mcf'
@@ -642,6 +650,40 @@ resource corpbApp 'Microsoft.App/containerApps@2024-03-01' = if (enablePartners)
   dependsOn: [ roleCorpbAcr, partnerState ]
 }
 
+// Corp C: the second retail client, a home goods chain. Its website sends consumer orders and its twelve
+// stores send weekly case orders; both draw on Corp C's stock at Corp A.
+resource corpcApp 'Microsoft.App/containerApps@2024-03-01' = if (enablePartners) {
+  name: '${prefix}-corpc-oms'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${corpcId.id}': {} } }
+  properties: {
+    managedEnvironmentId: cae.id
+    configuration: {
+      registries: [ { server: acr.properties.loginServer, identity: corpcId.id } ]
+      ingress: { external: true, targetPort: simPlaceholder ? 80 : 8080, transport: 'auto', allowInsecure: false }
+    }
+    template: {
+      containers: [ {
+        name: 'corpc'
+        image: simImage
+        command: simPlaceholder ? null : [ 'python', '-m', 'sim.corpc' ]
+        resources: { cpu: json('0.25'), memory: '0.5Gi' }
+        env: [
+          { name: 'AZURE_CLIENT_ID', value: corpcId!.properties.clientId }
+          { name: 'SIM_KEYVAULT_URL', value: kv.properties.vaultUri }
+          { name: 'SIM_COSMOS_URL', value: cosmos.properties.documentEndpoint }
+          { name: 'SIM_COSMOS_DB', value: 'corpc' }
+          { name: 'CORPC_GATEWAY_URL', value: 'https://${gatewayApp!.properties.configuration.ingress.fqdn}' }
+          { name: 'CORPC_LANDING_URL', value: storage.properties.primaryEndpoints.blob }
+          { name: 'CORPC_WEB_ORDERS_PER_DAY', value: corpcWebOrdersPerDay }
+        ]
+      } ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+  dependsOn: [ roleCorpcAcr, partnerState ]
+}
+
 resource landing 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' existing = {
   parent: blobSvc
   name: 'landing'
@@ -659,6 +701,12 @@ resource roleCorpbAcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = if 
   properties: { principalId: corpbId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull) }
 }
 
+resource roleCorpcAcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
+  scope: acr
+  name: guid(acr.id, '${prefix}-corpc-id', roles.acrPull)
+  properties: { principalId: corpcId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull) }
+}
+
 // Shared partner credentials (OAuth client, webhook secret, API keys) are seeded by the deploy workflow.
 resource roleCorpaKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
   scope: kv
@@ -672,11 +720,24 @@ resource roleCorpbKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (
   properties: { principalId: corpbId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.keyVaultSecretsUser) }
 }
 
-// Corp B drops planning files into the landing container only.
+resource roleCorpcKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
+  scope: kv
+  name: guid(kv.id, '${prefix}-corpc-id', roles.keyVaultSecretsUser)
+  properties: { principalId: corpcId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.keyVaultSecretsUser) }
+}
+
+// Corp B and Corp C drop their files into the landing container only.
 resource roleCorpbLanding 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
   scope: landing
   name: guid(storage.id, 'landing', '${prefix}-corpb-id', roles.storageBlobDataContributor)
   properties: { principalId: corpbId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.storageBlobDataContributor) }
+  dependsOn: [ blobContainers ]
+}
+
+resource roleCorpcLanding 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enablePartners) {
+  scope: landing
+  name: guid(storage.id, 'landing', '${prefix}-corpc-id', roles.storageBlobDataContributor)
+  properties: { principalId: corpcId!.properties.principalId, principalType: 'ServicePrincipal', roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.storageBlobDataContributor) }
   dependsOn: [ blobContainers ]
 }
 
@@ -699,6 +760,17 @@ resource roleCorpbCosmos 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignmen
     scope: '${cosmos.id}/dbs/corpb'
   }
   dependsOn: [ roleCorpaCosmos ] // Cosmos accepts one role assignment write at a time
+}
+
+resource roleCorpcCosmos 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = if (enablePartners) {
+  parent: cosmos
+  name: guid(cosmos.id, '${prefix}-corpc-id', 'corpc-db')
+  properties: {
+    principalId: corpcId!.properties.principalId
+    roleDefinitionId: '${cosmos.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002'
+    scope: '${cosmos.id}/dbs/corpc'
+  }
+  dependsOn: [ roleCorpbCosmos ]
 }
 
 // ------------------------------------------------------------------ RBAC for the agents' managed identity
@@ -796,3 +868,4 @@ output consoleUrl string = 'https://${consoleApp.properties.configuration.ingres
 output gatewayUrl string = enablePartners ? 'https://${gatewayApp!.properties.configuration.ingress.fqdn}' : ''
 output corpaUrl string = enablePartners ? 'https://${corpaApp!.properties.configuration.ingress.fqdn}' : ''
 output corpbUrl string = enablePartners ? 'https://${corpbApp!.properties.configuration.ingress.fqdn}' : ''
+output corpcUrl string = enablePartners ? 'https://${corpcApp!.properties.configuration.ingress.fqdn}' : ''

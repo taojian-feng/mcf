@@ -139,7 +139,7 @@ class PartnerConnectors:
         if kind == "catalog":
             self.apply_catalog(records, feed_id, tenant.tenant_id)
         elif tenant.tenant_id != TENANT_ONE:
-            # Planning runs on tenant one's inventory until clients own separate stock (roadmap step 5).
+            # Clients own separate stock now, but planning still runs for tenant one only (per-client planning is next).
             log.warning("feed %s: %s feeds are planned for %s only so far", path, kind, TENANT_ONE)
             return
         elif kind == "forecast":

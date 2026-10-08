@@ -101,6 +101,30 @@ class IntegrationLayer:
         }
         return self.call("CreateFulfillmentOrder", payload, agent=agent, order_ids=[order_view["order_id"]])
 
+    def create_store_fulfillment_order(self, rec: dict[str, Any], ship_to: dict[str, Any], *,
+                                       agent: str) -> CallResult:
+        """A B2B order: whole cases to a store's receiving dock by freight, inside the delivery window."""
+        payload = {
+            "sellerFulfillmentOrderId": rec["order_id"],
+            "displayableOrderId": rec["order_id"],
+            "displayableOrderDate": rec["placed_at"],
+            "orderType": "B2B",
+            "shippingSpeedCategory": "Freight",
+            "deliveryWindow": {"start": rec["window_start"], "end": rec["promised_by"]},
+            "destinationAddress": {
+                "name": ship_to["store_name"], "storeId": rec["store_id"],
+                "addressLine1": ship_to["line1"], "addressLine2": ship_to.get("line2"),
+                "city": ship_to["city"], "stateOrRegion": ship_to["state"],
+                "postalCode": ship_to["postal_code"], "countryCode": ship_to.get("country", "US"),
+            },
+            "items": [
+                {"sellerSku": a["upc"], "sellerFulfillmentOrderItemId": a["line_id"],
+                 "quantity": a["cases_allocated"] * a["case_pack"], "casePack": a["case_pack"]}
+                for a in rec["allocation"] if a["cases_allocated"] > 0
+            ],
+        }
+        return self.call("CreateFulfillmentOrder", payload, agent=agent, order_ids=[rec["order_id"]])
+
     # ---------------------------------------------------------------- feeds (R7.2, R7.3)
 
     def ingest_feed(self, feed_id: str, records: list[dict[str, Any]], schema: type[BaseModel], *,
