@@ -6,10 +6,11 @@ simulator knows really happened to the order (lost, delayed, failed delivery, or
 Each arm then classifies the same recorded signals:
 
   rules        deterministic signal-type rules only (no model)
-  hybrid       what production runs: rules, and Claude only for signals the rules find ambiguous
+  hybrid       the earlier production setup: rules, and Claude only for signals the rules find ambiguous
   llm          Claude on every signal, seeing the signal alone
   llm_context  Claude on every signal, also seeing the order's timeline from our records at that moment
-               (the evidence an investigating agent would look up)
+  agent        what the exception agent runs now: it reads the order's record and asks Claude with it,
+               falling back to rules if the call fails
 
 What matters most is "wrong and acted on": a confident wrong answer starts the wrong playbook without a
 person looking. Then accuracy, and how much goes to a human.
@@ -29,22 +30,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from tower.agents.exception import SYSTEM_PROMPT, Classifier
+from tower.agents.exception import INVESTIGATE_PROMPT, SYSTEM_PROMPT, Classifier, order_evidence
 from tower.core import topics
 from tower.core.models import Classification, ExceptionCategory, UnhappyPathSignal
 from tower.core.ports import LLM, Event
 
 C = ExceptionCategory
 NONE = "no_real_problem"
-ARMS = ("rules", "hybrid", "llm", "llm_context")
+ARMS = ("rules", "hybrid", "llm", "llm_context", "agent")
 # Claude Opus 5.5 list prices, USD per million tokens (Foundry bills at the same rates).
 PRICE_IN, PRICE_OUT = 4.00, 20.00
 
-CONTEXT_PROMPT = SYSTEM_PROMPT + (
-    " You also get the order's record as our system saw it when the signal arrived: its lifecycle states with "
-    "times, the promised delivery date, the latest projected delivery date, and carrier tracking events. Use "
-    "that evidence. If the order looks healthy and the signal is a false alarm, return category null."
-)
+CONTEXT_PROMPT = INVESTIGATE_PROMPT
 
 
 @dataclass
@@ -98,7 +95,7 @@ def collect(days: float, orders_per_day: int, catalog_size: int, seed: int) -> l
         def record(event: Event) -> None:
             sig = UnhappyPathSignal.model_validate(event.payload)
             snap = store.get("orders", sig.order_id) if sig.order_id else None
-            samples.append(Sample(sig, _timeline(snap) if snap else None))
+            samples.append(Sample(sig, order_evidence(snap)))
 
         world.ports.bus.subscribe(topics.EXCEPTION_SIGNALS, record, subscription="eval-recorder")
         world.run(hours=days * 24)
@@ -106,13 +103,6 @@ def collect(days: float, orders_per_day: int, catalog_size: int, seed: int) -> l
         for s in samples:
             s.truth = _truth(world, s.signal)
     return [s for s in samples if s.truth is not None]
-
-
-def _timeline(order: dict[str, Any]) -> dict[str, Any]:
-    """What an investigator would read: no consumer data, just the order's own history."""
-    keys = ("order_id", "placed_at", "promised_by", "delivery_promise_days", "state", "transitions",
-            "projected_delivery", "missing_projection_checks", "tracking", "delivered_on")
-    return {k: order.get(k) for k in keys}
 
 
 def _truth(world, sig: UnhappyPathSignal) -> str | None:
@@ -149,6 +139,8 @@ def score(samples: list[Sample], arm: str, llm: LLM | None, threshold: float, wo
             return rules.classify(s.signal)
         if arm == "hybrid":
             return hybrid.classify(s.signal)
+        if arm == "agent":
+            return hybrid.classify(s.signal, s.order_snapshot)
         prompt = {"signal": s.signal.model_dump(mode="json")}
         system = SYSTEM_PROMPT
         if arm == "llm_context":

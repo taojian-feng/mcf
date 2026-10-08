@@ -311,3 +311,36 @@ def test_feed_validation_quarantines_bad_records(system):
     assert ("quarantine", "fc-2026-10-05.json") in system.ports.blobs.blobs
     [report] = system.ports.notifier.to("data@corpb")
     assert "upc" in report["body"] and "units" in report["body"]
+
+
+# ---------------------------------------------------------------- R3.1 investigator: Claude reads the order first
+
+def test_claude_classifies_with_the_order_record(directory):
+    import json
+    from conftest import PILOT_UPCS
+    from tower.core.config import PilotConfig
+    from tower.core.models import Classification
+    from tower.runtime import build, memory_ports
+
+    class Claude:
+        prompts: list[dict] = []
+
+        def structured(self, *, system, prompt, schema):
+            self.prompts.append(json.loads(prompt))
+            return Classification(category=ExceptionCategory.FAILED_DELIVERY, confidence=0.9,
+                                  rationale="tracking shows a failed delivery attempt")
+
+    llm = Claude()
+    s = build(memory_ports(directory=directory, llm=llm), PilotConfig(pilot_upcs=set(PILOT_UPCS)), sleep=lambda _: None)
+    send_order(s, order_payload())
+    status(s, "ord-1", "acknowledged")
+    signal(s, "projected_promise_breach")  # the rules alone would call this a delay at 0.95
+
+    [prompt] = llm.prompts
+    record = prompt["order_record"]
+    assert record["order_id"] == "ord-1" and record["state"] == "acknowledged" and record["promised_by"]
+    assert "consumer" not in record                                   # no PII reaches the model
+    [case] = cases(s)
+    assert case["classification"]["category"] == ExceptionCategory.FAILED_DELIVERY.value
+    assert case["playbook_id"] == "PB-FAILED"
+    assert any(h["event"] == "order_record_read" for h in case["history"])
