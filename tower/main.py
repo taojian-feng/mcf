@@ -29,8 +29,13 @@ def main(argv: list[str]) -> None:
     if run is None:
         raise SystemExit("this bus adapter has no consumer loop (use MCF_CLOUD=azure)")
     secrets = getattr(ports, "secrets", None)
-    PartnerConnectors(system, corpb_url=os.environ.get("MCF_CORPB_URL"), env=os.environ.get,
-                      secret=secrets.get_secret if secrets else (lambda name: os.environ[name.upper().replace("-", "_")]))
+    connectors = PartnerConnectors(system, corpb_url=os.environ.get("MCF_CORPB_URL"), env=os.environ.get,
+                                   secret=secrets.get_secret if secrets else (lambda name: os.environ[name.upper().replace("-", "_")]))
+    try:
+        connectors.catch_up_catalogs()
+    except Exception:  # noqa: BLE001 - the next catalog feed still loads normally
+        logging.getLogger("tower.main").exception("could not catch up missing catalogs")
+    logging.getLogger("tower.main").info("catalogs: %s", {t: len(system.config.catalog(t)) for t in system.config.tenants})
     keep_catalog_fresh(system)
     run()
 

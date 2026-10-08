@@ -5,6 +5,7 @@ orders are cases to a store by freight, due inside the store's delivery window; 
 each line is allocated against the client's shared stock (services/allocation.py)."""
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -22,6 +23,7 @@ from tower.services.handoffs import HandoffService
 from tower.services.integration import IntegrationLayer
 
 AGENT = "orchestration_agent"
+log = logging.getLogger("tower.orchestration")
 ORDERS = "orders"
 ORDER_PII = "order_pii"  # encrypted container with PII retention TTL; read only through governance
 
@@ -51,6 +53,7 @@ class OrchestrationAgent:
 
         reasons = self._ineligibility(order)
         if reasons:
+            log.warning("order %s (%s) turned away: %s", order.order_id, order.tenant_id, "; ".join(reasons))
             self.bus.publish(Event(topics.OMS_OUTBOUND, "order_rejected",
                                    {"order_id": order.client_order_id or order.order_id, "tenant_id": order.tenant_id,
                                     "reasons": reasons}, self.clock.now(), correlation_id=order.order_id))
@@ -81,6 +84,7 @@ class OrchestrationAgent:
         if not reasons and not any(a.cases_allocated for a in allocation):
             reasons = ["no stock to spare for this store order after the web reserve"]
         if reasons:
+            log.warning("store order %s (%s) turned away: %s", order.order_id, order.tenant_id, "; ".join(reasons))
             self.bus.publish(Event(topics.OMS_OUTBOUND, "order_rejected",
                                    {"order_id": client_id, "tenant_id": order.tenant_id, "store_id": order.store_id,
                                     "reasons": reasons, "allocation": [a.as_dict() for a in allocation]},

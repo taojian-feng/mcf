@@ -228,6 +228,7 @@ class CorpC:
         doc["updates"] = (doc.get("updates") or [])[-20:] + [{"type": kind, "at": _iso(now)}]
         if kind == "order_rejected":
             doc["status"] = "rejected"
+            log.warning("order %s turned away: %s", p.get("order_id"), "; ".join(p.get("reasons") or []))
             self._release(doc)
         elif kind == "store_order_allocated":
             doc["allocated"] = {ln["line_id"]: ln["cases_allocated"] for ln in p.get("lines") or []}

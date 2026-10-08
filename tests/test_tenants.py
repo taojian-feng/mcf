@@ -144,6 +144,37 @@ def test_a_catalog_feed_lands_in_its_clients_catalog(two):
     assert two.ports.store.get(*catalog_doc("retailer_two"))["tenant_id"] == "retailer_two"
 
 
+def test_a_catalog_set_aside_before_its_client_was_registered_is_caught_up(two):
+    late = Tenant(tenant_id="retailer_three", name="Retailer Three", promise_days=[3])
+    conn = PartnerConnectors(two, corpb_url=None, secret=KEYS.__getitem__)
+    records = [{"upc": "390000000002", "title": "Rug", "unit_cost": 40}]
+    two.ports.blobs.write("landing", "retailerthree/catalog/2026-10-08-a.json", json.dumps({"records": records}).encode())
+    event = Event(topics.FEEDS_ARRIVED, "Microsoft.Storage.BlobCreated",
+                  {"subject": "/blobServices/default/containers/landing/blobs/retailerthree/catalog/2026-10-08-a.json"},
+                  two.ports.clock.now())
+    conn.on_feed(event)                                                          # no such client: set aside
+    assert two.config.catalog("retailer_three") == set()
+
+    two.config.tenants = {**two.config.tenants, "retailer_three": late}          # registry reread later
+    assert conn.catch_up_catalogs() == ["retailerthree/catalog/2026-10-08-a.json"]
+    assert two.config.catalog("retailer_three") == {"390000000002"}
+    assert conn.catch_up_catalogs() == []                                        # only once
+    assert two.config.pilot_upcs == set(PILOT_UPCS)
+
+
+def test_a_feed_from_a_new_client_rereads_the_registry(two):
+    registry = {**tenants(), "retailer_three": Tenant(tenant_id="retailer_three", name="Retailer Three",
+                                                      promise_days=[3])}
+    two.ports.directory.tenants = lambda: registry
+    conn = PartnerConnectors(two, corpb_url=None, secret=KEYS.__getitem__)
+    records = [{"upc": "390000000002", "title": "Rug", "unit_cost": 40}]
+    two.ports.blobs.write("landing", "retailerthree/catalog/c1.json", json.dumps({"records": records}).encode())
+    conn.on_feed(Event(topics.FEEDS_ARRIVED, "Microsoft.Storage.BlobCreated",
+                       {"subject": "/blobServices/default/containers/landing/blobs/retailerthree/catalog/c1.json"},
+                       two.ports.clock.now()))
+    assert two.config.catalog("retailer_three") == {"390000000002"}
+
+
 # ---------------------------------------------------------------- the people file
 
 def test_people_file_with_two_clients():

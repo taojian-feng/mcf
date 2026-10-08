@@ -150,6 +150,7 @@ class CorpB:
             doc["updates"] = (doc.get("updates") or [])[-20:] + [{"type": body.get("type"), "at": _iso(now)}]
             if body.get("type") == "order_rejected":
                 doc["status"] = "rejected"
+                log.warning("order %s turned away: %s", order_id, "; ".join(body["payload"].get("reasons") or []))
             elif body.get("type") == "tracking_update":
                 was, doc["status"] = doc["status"], f"tracking:{(body['payload'].get('status') or '').lower()}"
                 if doc["status"] == "tracking:delivered" and was != doc["status"]:

@@ -124,7 +124,7 @@ class PartnerConnectors:
             log.warning("feed %s: expected <client>/<feed type>/<file>", path)
             return
         kind = parts[1]
-        tenant = next((t for t in self.system.config.tenants.values() if t.feed_folder == parts[0]), None)
+        tenant = self._tenant_for_folder(parts[0])
         if tenant is None:
             log.warning("feed %s: folder %s belongs to no client", path, parts[0])
             return
@@ -132,8 +132,7 @@ class PartnerConnectors:
         done_key = f"feed:{path}"
         if store.get("planning_meta", done_key):
             return  # Event Grid delivers at least once
-        doc = json.loads(self.system.ports.blobs.read("landing", path))
-        records = doc.get("records", doc) if isinstance(doc, dict) else doc
+        records = self._records(path)
         feed_id = f"{kind}:{parts[-1].rsplit('.', 1)[0]}"
         planning = self.system.planning
         if kind == "catalog":
@@ -154,6 +153,47 @@ class PartnerConnectors:
         store.put("planning_meta", done_key, {"path": path, "kind": kind, "records": len(records),
                                               "processed_at": self.system.ports.clock.now().isoformat()})
         log.info("feed %s: %d records processed", path, len(records))
+
+    def _tenant_for_folder(self, folder: str) -> Tenant | None:
+        """A new client's first files can land before this process has reread the registry: reread it then."""
+        config = self.system.config
+        tenant = next((t for t in config.tenants.values() if t.feed_folder == folder), None)
+        load = getattr(self.system.ports.directory, "tenants", None)
+        if tenant is None and load is not None:
+            try:
+                config.tenants = load()
+            except Exception:  # noqa: BLE001 - keep the copy we have
+                log.exception("could not reread the client registry")
+            tenant = next((t for t in config.tenants.values() if t.feed_folder == folder), None)
+        return tenant
+
+    def _records(self, path: str) -> list[dict[str, Any]]:
+        doc = json.loads(self.system.ports.blobs.read("landing", path))
+        return doc.get("records", doc) if isinstance(doc, dict) else doc
+
+    def catch_up_catalogs(self) -> list[str]:
+        """Apply the newest catalog file of any client that has none loaded (one set aside before the client
+        was registered, say). Without a catalog every order from that client is turned away."""
+        listing = getattr(self.system.ports.blobs, "list", None)
+        store, applied = self.system.ports.store, []
+        if listing is None:
+            return applied
+        for tenant in list(self.system.config.tenants.values()):
+            if store.get(*catalog_doc(tenant.tenant_id)):
+                continue
+            paths = sorted(listing("landing", f"{tenant.feed_folder}/catalog/"))
+            if not paths:
+                log.warning("no catalog for client %s yet; its orders will be turned away until one arrives",
+                            tenant.tenant_id)
+                continue
+            path = paths[-1]
+            records = self._records(path)
+            self.apply_catalog(records, f"catalog:{path.rsplit('/', 1)[-1].rsplit('.', 1)[0]}", tenant.tenant_id)
+            store.put("planning_meta", f"feed:{path}", {"path": path, "kind": "catalog", "records": len(records),
+                                                        "processed_at": self.system.ports.clock.now().isoformat()})
+            log.warning("client %s had no catalog; loaded %s (%d records)", tenant.tenant_id, path, len(records))
+            applied.append(path)
+        return applied
 
     def apply_catalog(self, records: list[dict[str, Any]], feed_id: str, tenant_id: str = TENANT_ONE) -> None:
         """A client's item master: the UPCs in scope and their unit costs (used for replenishment value)."""

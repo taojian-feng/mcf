@@ -121,6 +121,9 @@ class InMemoryBlobStore:
     def read(self, container: str, path: str) -> bytes:
         return self.blobs[(container, path)]
 
+    def list(self, container: str, prefix: str) -> list[str]:
+        return sorted(p for c, p in self.blobs if c == container and p.startswith(prefix))
+
 
 class LedgerTamperError(PermissionError):
     pass
