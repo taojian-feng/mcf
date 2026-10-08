@@ -23,7 +23,7 @@ PILOT_CONTACTS = {"program_lead": "pilot_program_lead", "governance_owner": "pil
 PARTY_CONTACTS = {"ops": "{p}_ops", "escalation": "{p}_escalation", "data": "{p}_data_contact",
                   "inventory": "{p}_inventory", "planner": "{p}_planner", "review": "{p}_review"}
 CONTRACT_FIELDS = ("name", "active", "order_prefix", "feed_folder", "api_key_secret", "outbound_url",
-                   "outbound_key_secret", "promise_days")
+                   "outbound_key_secret", "promise_days", "channels", "online_protect_days", "store_lead_days")
 
 
 def _emails(value: Any) -> list[str]:

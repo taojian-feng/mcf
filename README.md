@@ -19,6 +19,7 @@ See [docs/DEPLOY_AZURE.md](docs/DEPLOY_AZURE.md): a one-time Cloud Shell setup s
 |---|---|---|
 | Ports + in-memory adapters | done | foundation for all |
 | Retail clients (tenants) | done: client registry, tenant on every record, per-client contract, people and data fence | roadmap step 4 |
+| Stores (offline channel) | done: store orders, allocation that protects web stock, B2B freight, advance ship notices; Corp C simulator | roadmap step 5 |
 | Audit_Service | done | R10.1, R10.2, R10.3, R10.5, R10.6, R10.7 |
 | Approval_Workflow | done | R8.1 to R8.8 |
 | Data_Governance_Service | done (isolation + masking) | R9.1, R9.2, R9.4, R9.6, R9.7, R9.8 |

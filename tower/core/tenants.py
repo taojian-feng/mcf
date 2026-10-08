@@ -31,6 +31,11 @@ class Tenant(BaseModel):
     outbound_key_secret: str = ""              # Key Vault secret we call the client's endpoint with
     promise_days: list[int] = Field(default_factory=lambda: [2, 3])  # delivery promises the SLA covers
     eligible_states: set[str] | None = None    # None: the US 48 states
+    channels: list[str] = Field(default_factory=lambda: ["online"])  # online (parcels to consumers), store
+    # Store orders share the client's stock with its web orders. When a store order would cut into the
+    # stock its web orders need for this many days, the store gets less (whole cases) and is told so.
+    online_protect_days: float = 7.0
+    store_lead_days: int = 2                   # a store's delivery window can't end sooner than this
 
     @model_validator(mode="after")
     def _defaults(self) -> "Tenant":

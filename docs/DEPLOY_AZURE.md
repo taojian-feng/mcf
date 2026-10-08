@@ -150,26 +150,29 @@ The console checks your approver role from the people file and records every dec
 The console scales to zero when idle, so the first click after a quiet spell takes a few seconds. To revoke every
 link at once, change the `approval-link-key` secret in Key Vault and restart the `mcfpilot-all` app.
 
-### Partners: Corp A and Corp B
+### Partners: Corp A, Corp B and Corp C
 
-The deploy runs both partner companies as simulators, each in its own Container App with its own identity and
+The deploy runs every partner company as a simulator, each in its own Container App with its own identity and
 database, talking to the system only over HTTPS (contract and behaviour: [PARTNER_APIS.md](PARTNER_APIS.md)):
 
 - **Corp B** (`mcfpilot-corpb-oms`) sends its item catalog and planning files at go-live, starts ordering about
   15 minutes later (about 140 orders a day, `corpbOrdersPerDay`), sends a forecast an hour in, and new forecast
   and sales files every Monday.
+- **Corp C** (`mcfpilot-corpc-oms`) is the second retail client, a home goods chain. It sends its catalog at
+  go-live, then about 60 web orders a day (`corpcWebOrdersPerDay`), and each of its twelve stores sends a weekly
+  case order. Its web and store orders share its stock at Corp A.
 - **Corp A** (`mcfpilot-corpa-mcf`) is the MCF API. Once the catalog is listed with it, it receives opening
   stock, then accepts, packs, ships and delivers orders on realistic timings, with the occasional late,
   lost or undeliverable parcel, nightly stock counts, and an ops team that works the system's handoffs.
-- **The partner gateway** (`mcfpilot-gateway`) is how both get in: Corp B with an API key, Corp A with signed
+- **The partner gateway** (`mcfpilot-gateway`) is how they get in: the retailers with API keys, Corp A with signed
   webhooks.
 
 The shared credentials are created once in Key Vault by the deploy. What you will notice is email: daily
 reconciliation, exceptions that need a person, handoff escalations and approvals.
 
-To pause the partners, scale both simulators to zero (portal > Container App > Scale, or
+To pause the partners, scale the simulators to zero (portal > Container App > Scale, or
 `az containerapp update -g mcfpilot-dev-rg -n mcfpilot-corpb-oms --min-replicas 0 --max-replicas 0`, then the same
-for `mcfpilot-corpa-mcf`). To remove them, deploy with `enablePartners=false`. To connect a real Corp A later, point
+for `mcfpilot-corpc-oms` and `mcfpilot-corpa-mcf`). To remove them, deploy with `enablePartners=false`. To connect a real Corp A later, point
 `MCF_API_BASE_URL` at it and put its OAuth client in `mcf-client-id` / `mcf-client-secret`.
 
 ### Claude

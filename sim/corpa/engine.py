@@ -1,7 +1,10 @@
 """Corp A: the fulfillment network behind the MCF API.
 
 Orders move through Corp A's own statuses on realistic timings (minutes to accept, hours to pick and
-pack, carrier transit days by distance), inventory is reserved, picked, replenished, transferred and
+pack, carrier transit days by distance). Parcel orders go to consumers from the FCs. B2B orders (store
+replenishment) go as whole cases on pallets by LTL freight, mostly from the bulk storage centres, ship
+what is in stock (short lines are cut, not held), send an advance ship notice and arrive on a dock
+appointment inside the store's delivery window. Inventory is reserved, picked, replenished, transferred and
 counted, and partner cases (carrier traces, cancellations, transfers, removals) are worked by an ops
 team that is usually, but not always, on time. Everything Corp A wants the seller to know goes out
 as a signed webhook through an outbox, retried until the seller's endpoint accepts it.
@@ -31,6 +34,9 @@ CUTOFF_HOUR_UTC = 23
 
 # Share of accepted orders that meet each carrier fate. The rest are delivered as planned.
 FATES = (("delay", 0.04), ("attempt", 0.015), ("lost", 0.004), ("undeliverable", 0.003))
+FREIGHT_FATES = (("delay", 0.06),)            # LTL: a missed dock appointment is the common failure
+LTL_CARRIERS = ("Estes", "XPO", "Old Dominion", "Saia")
+CASES_PER_PALLET = 30
 
 
 def _iso(t: datetime) -> str:
@@ -48,13 +54,14 @@ def _err(code: str, message: str) -> dict[str, Any]:
 class CorpA:
     def __init__(self, store: SimStore, clock, *, webhook_url: str, webhook_secret: str,
                  send: Sender = urllib_sender, rng: random.Random | None = None, speed: float = 1.0,
-                 shrink_rate: float = 0.0005, catalog_seed: int = 2026, catalog_size: int = catalog.PILOT_SIZE):
+                 shrink_rate: float = 0.0005, catalog_seed: int = 2026, catalog_size: int = catalog.PILOT_SIZE,
+                 corpc_size: int = catalog.CORPC_SIZE):
         self.store, self.clock = store, clock
         self.webhook_url, self.webhook_secret, self.send = webhook_url, webhook_secret, send
         self.rng = rng or random.Random()
         self.speed = speed
         self.shrink_rate = shrink_rate
-        self.catalog = catalog.by_upc(catalog_seed, catalog_size)  # what the seller could list
+        self.catalog = catalog.every_client(catalog_seed, catalog_size, corpc_size)  # what sellers could list
         self.items: dict[str, catalog.Item] = {}                    # what the seller has listed with Corp A
         self.lock = threading.RLock()
         self._load_listings()
@@ -86,6 +93,7 @@ class CorpA:
                 "dest": geo.zip_location(addr["postalCode"], addr["stateOrRegion"]),
                 "speed": req.get("shippingSpeedCategory", "Standard"), "lines": [], "packages": [],
                 "eta": None, "fate": "normal", "history": [{"status": "RECEIVED", "at": _iso(now)}],
+                **({"b2b": True, "window": req["deliveryWindow"]} if req.get("orderType") == "B2B" else {}),
             })
         return 202, {"sellerFulfillmentOrderId": sfo, "status": "RECEIVED"}
 
@@ -104,7 +112,17 @@ class CorpA:
             out.append("only US destinations are served")
         if a.get("postalCode") and not (len(a["postalCode"]) == 5 and a["postalCode"].isdigit()):
             out.append("destinationAddress.postalCode must be 5 digits")
-        if req["shippingSpeedCategory"] not in ("Standard", "Expedited", "Priority"):
+        if req.get("orderType") == "B2B":
+            w = req.get("deliveryWindow") or {}
+            if not (w.get("start") and w.get("end")):
+                out.append("deliveryWindow.start and deliveryWindow.end are required for B2B orders")
+            if req["shippingSpeedCategory"] != "Freight":
+                out.append("B2B orders ship Freight")
+            for it in req["items"]:
+                pack, qty = it.get("casePack"), it.get("quantity")
+                if not isinstance(pack, int) or pack < 1 or (isinstance(qty, int) and qty % pack):
+                    out.append(f"quantity for {it.get('sellerSku')} must be whole cases of casePack")
+        elif req["shippingSpeedCategory"] not in ("Standard", "Expedited", "Priority"):
             out.append("shippingSpeedCategory must be Standard, Expedited or Priority")
         for it in req["items"]:
             if it.get("sellerSku") not in self.items:
@@ -246,7 +264,9 @@ class CorpA:
 
     def _advance_order(self, o: dict[str, Any], now: datetime) -> None:
         step = o["step"]
-        if step == "accept":
+        if o.get("b2b") and step in ("accept", "ship"):
+            (self._accept_b2b if step == "accept" else self._ship_b2b)(o, now)
+        elif step == "accept":
             if not self._allocate(o):
                 self._set_status(o, "UNFULFILLABLE", now, reason="insufficient inventory in the pilot network")
                 o["step"], o["next_at"] = None, None
@@ -293,7 +313,8 @@ class CorpA:
                 self._status_note(o, now)
         elif step == "deliver":
             self._set_status(o, "DELIVERED", now)
-            self._track(o, "DELIVERED", now, "Delivered, front door")
+            self._track(o, "DELIVERED", now, "Delivered to store receiving, POD signed" if o.get("b2b")
+                        else "Delivered, front door")
             o["step"], o["next_at"] = None, None
         elif step == "declare_lost":
             self._track(o, "LOST", now, "Carrier has no scan for 48 hours; package presumed lost")
@@ -308,9 +329,87 @@ class CorpA:
             o["step"], o["next_at"] = None, None
         self.store.put(o)
 
-    def _fate(self) -> str:
+    # ---------------------------------------------------------------- B2B (store replenishment by freight)
+
+    def _accept_b2b(self, o: dict[str, Any], now: datetime) -> None:
+        """Ship what is in stock in whole cases, from the region's bulk centre first; cut the rest."""
+        isc, fc = geo.REGION_ISC[o["region"]], geo.REGION_FC[o["region"]]
+        lines, cut = [], []
+        for it in o["request"]["items"]:
+            sku, left, pack = it["sellerSku"], it["quantity"], it["casePack"]
+            for node in (isc, fc, _other_fc(fc)):
+                take = min(left, max(0, self._available(sku, node))) // pack * pack
+                if take:
+                    self._reserve(sku, node, take)
+                    lines.append({"line_id": it.get("sellerFulfillmentOrderItemId"), "sku": sku, "qty": take,
+                                  "node": node, "case_pack": pack})
+                    left -= take
+                if not left:
+                    break
+            if left:
+                cut.append({"sellerSku": sku, "unitsCut": left})
+        if not lines:
+            self._set_status(o, "UNFULFILLABLE", now, reason="no stock for any line")
+            o["step"], o["next_at"] = None, None
+            return
+        o["lines"], o["cut"] = lines, cut
+        ship = _ship_date(now) + timedelta(days=1)                       # freight is booked a day ahead
+        dist = max(geo.miles(geo.NODES[ln["node"]], tuple(o["dest"])) for ln in lines)
+        start = date.fromisoformat(o["window"]["start"])
+        arrive = max(start, ship + timedelta(days=geo.ground_days(dist) + 1))  # LTL runs a day slower than parcel
+        o["fate"] = o["assigned_fate"] = self._fate(FREIGHT_FATES)
+        o["plan"] = {"ship_date": ship.isoformat(), "mode": "ltl", "miles": round(dist, 1),
+                     "appointment": arrive.isoformat()}
+        o["eta"] = arrive.isoformat()
+        self._set_status(o, "ACCEPTED", now, reason=f"{len(cut)} line(s) cut for stock" if cut else None)
+        o["ship_at"] = _iso(datetime.combine(ship, time(self.rng.randint(14, 20)), timezone.utc))
+        o["step"], o["next_at"] = "process", _iso(now + self._wait(minutes=(20, 90)))
+
+    def _ship_b2b(self, o: dict[str, Any], now: datetime) -> None:
+        """One truckload: pallets of whole cases, an LTL PRO number, a dock appointment, and the ship notice."""
+        plan = o["plan"]
+        cases = sum(ln["qty"] // ln["case_pack"] for ln in o["lines"])
+        pallets = max(1, math.ceil(cases / CASES_PER_PALLET))
+        carrier, pro = self.rng.choice(LTL_CARRIERS), f"{self.rng.randint(10**9, 10**10 - 1)}"
+        bol = f"BOL{uuid.uuid4().hex[:10].upper()}"
+        appt = datetime.combine(date.fromisoformat(plan["appointment"]), time(self.rng.choice([7, 8, 9, 10, 13])),
+                                timezone.utc)
+        weight = sum(self.catalog[ln["sku"]].weight_lb * ln["qty"] for ln in o["lines"]) + 45 * pallets
+        o["packages"].append({
+            "packageNumber": bol, "carrier": carrier, "trackingNumber": pro, "fromNode": o["lines"][0]["node"],
+            "shippedAt": _iso(now), "mode": "ltl", "finalMileMiles": 0.0, "status": "SHIPPED",
+            "items": [{"sellerSku": ln["sku"], "quantity": ln["qty"]} for ln in o["lines"]],
+            "events": [{"eventCode": "SHIPPED", "eventTime": _iso(now), "description": f"Picked up by {carrier}"}],
+        })
+        self.store.put({"id": f"pkg:{bol}", "doc_type": "package", "sfo_id": o["sfo_id"]})
+        by_sku: dict[str, dict[str, Any]] = {}
+        for ln in o["lines"]:
+            d = by_sku.setdefault(ln["sku"], {"sellerSku": ln["sku"], "lineId": ln["line_id"],
+                                              "casePack": ln["case_pack"], "unitsShipped": 0, "casesShipped": 0})
+            d["unitsShipped"] += ln["qty"]
+            d["casesShipped"] += ln["qty"] // ln["case_pack"]
+        self._notify("ADVANCE_SHIP_NOTICE", {
+            "sellerFulfillmentOrderId": o["sfo_id"], "asnId": f"ASN{uuid.uuid4().hex[:10].upper()}",
+            "carrier": carrier, "proNumber": pro, "billOfLading": bol, "appointment": _iso(appt),
+            "pallets": pallets, "lines": list(by_sku.values()), "shippedAt": _iso(now),
+        })
+        self._notify("SHIPMENT_FACT", {
+            "package_id": bol, "order_id": o["sfo_id"], "shipped_on": now.date().isoformat(),
+            "units": sum(ln["qty"] for ln in o["lines"]), "pallets": pallets, "mode": "ltl", "carrier": carrier,
+            "fulfillment_cost": round(95 + 0.00009 * weight * plan["miles"], 2), "final_mile_miles": 0.0,
+            "from_node": o["lines"][0]["node"],
+        })
+        if o["fate"] == "delay":
+            appt += timedelta(days=self.rng.choice([1, 1, 2]))
+            o["eta"] = appt.date().isoformat()
+        self._set_status(o, "SHIPPED", now)
+        for p in o["packages"]:
+            self._send_tracking(o, p, "SHIPPED", now)
+        o["step"], o["next_at"] = "deliver", _iso(max(appt, now + timedelta(hours=12)))
+
+    def _fate(self, fates=FATES) -> str:
         r = self.rng.random()
-        for fate, p in FATES:
+        for fate, p in fates:
             if r < p:
                 return fate
             r -= p
@@ -481,7 +580,7 @@ class CorpA:
         log.info("snapshot: %d counts, %d shrink adjustments", len(counts), len(adjustments))
 
     def _vendor_receipts(self, now: datetime) -> None:
-        """Corp B's vendors deliver to the inbound storage centres weekly."""
+        """The clients' vendors deliver to the inbound storage centres weekly."""
         events = []
         for it in self.items.values():
             for region in catalog.REGIONS:

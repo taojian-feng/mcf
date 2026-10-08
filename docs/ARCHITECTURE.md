@@ -76,7 +76,10 @@ Corp A runs one network for many retail clients. Each client is a tenant (`tower
 - **Outbound.** Order updates go to the client the event names, at its `outbound_url` (or `MCF_<CLIENT>_URL`) with its own key.
 - **Registry.** `config/pilot.yaml` lists the clients under `clients:`. Each deploy writes it to App Configuration as `mcf:tenants`, and the running services re-read it every few minutes, so adding a client needs no redeploy of code.
 
-Still tenant one only, until a second client owns stock (roadmap step 5): inventory, planning, disposition and the pilot reports. Another client's forecast and sales feeds are accepted into storage but not planned yet, and the pilot reports count only tenant one's orders.
+- **Stock per client.** Each client owns its own items (`config.tenant_of_sku`), so every inventory position belongs to one client and carries its `tenant_id`. Reconciliation runs for every client's items; decant counts sent to Corp B carry only Corp B's.
+- **Channels.** A contract lists `online`, `store` or both. Store orders (`POST /v1/store-orders`) are whole cases for a store's dock inside a delivery window. Before submission `services/allocation.py` cuts each line to what the client can spare after a web reserve (`online_protect_days` of recent web demand), records the numbers in the audit ledger and tells the store (`store_order_allocated`). Corp A ships them as B2B freight and sends an advance ship notice, which the tower forwards to the store.
+
+Still tenant one only: planning, disposition and the pilot reports. Another client's forecast and sales feeds are accepted into storage but not planned yet, and store receiving discrepancies (short or damaged cases at the dock) are not handled yet.
 
 ## 3. Ports (what the core depends on)
 

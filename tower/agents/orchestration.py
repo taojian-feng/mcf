@@ -1,4 +1,8 @@
-"""Orchestration_Agent (R5): order lifecycle, MCF submission, delivery-promise monitoring."""
+"""Orchestration_Agent (R5): order lifecycle, MCF submission, delivery-promise monitoring.
+
+Two channels share the lifecycle. Online orders are parcels to a consumer with a promise in days. Store
+orders are cases to a store by freight, due inside the store's delivery window; before they go to Corp A
+each line is allocated against the client's shared stock (services/allocation.py)."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -7,9 +11,11 @@ from typing import Any
 from tower.core import topics
 from tower.core.config import PilotConfig
 from tower.core.models import (
-    ACTIVE_STATES, ConsumerOrder, OrderRecord, OrderState, UnhappyPathSignal, is_valid_transition,
+    ACTIVE_STATES, ConsumerOrder, OrderLine, OrderRecord, OrderState, StoreOrder, UnhappyPathSignal,
+    is_valid_transition,
 )
 from tower.core.ports import Clock, DocumentStore, Event, MessageBus
+from tower.services.allocation import AllocationService
 from tower.services.audit import AuditService
 from tower.services.governance import GovernanceService, Purpose
 from tower.services.handoffs import HandoffService
@@ -23,10 +29,11 @@ ORDER_PII = "order_pii"  # encrypted container with PII retention TTL; read only
 class OrchestrationAgent:
     def __init__(self, store: DocumentStore, bus: MessageBus, integration: IntegrationLayer,
                  governance: GovernanceService, audit: AuditService, handoffs: HandoffService,
-                 clock: Clock, config: PilotConfig):
+                 clock: Clock, config: PilotConfig, allocation: AllocationService | None = None):
         self.store, self.bus, self.integration = store, bus, integration
         self.governance, self.audit, self.handoffs = governance, audit, handoffs
         self.clock, self.config = clock, config
+        self.allocation = allocation or AllocationService(store, clock, config)
         bus.subscribe(topics.ORDERS_RECEIVED, self.on_order_received, subscription="orchestration-agent")
         bus.subscribe(topics.ORDERS_LIFECYCLE, self.on_lifecycle, subscription="orchestration-agent")
         bus.subscribe(topics.EXCEPTION_UPDATES, self.on_exception_update, subscription="orchestration-agent")
@@ -35,6 +42,9 @@ class OrchestrationAgent:
     # ---------------------------------------------------------------- intake (R5.1, R5.9)
 
     def on_order_received(self, event: Event) -> None:
+        if event.type == "store_order_received":
+            self.on_store_order(StoreOrder.model_validate(event.payload))
+            return
         order = ConsumerOrder.model_validate(event.payload)
         if self.store.get(ORDERS, order.order_id):
             return  # at-least-once delivery: already handled
@@ -60,6 +70,56 @@ class OrchestrationAgent:
         self._submit(rec)
         self._schedule("order_promise_check", rec.order_id, self.config.promise_check_interval)
 
+    # ---------------------------------------------------------------- store orders (offline channel)
+
+    def on_store_order(self, order: StoreOrder) -> None:
+        if self.store.get(ORDERS, order.order_id):
+            return
+        client_id = order.client_order_id or order.order_id
+        reasons = self._store_ineligibility(order)
+        allocation = [] if reasons else self.allocation.allocate(order)
+        if not reasons and not any(a.cases_allocated for a in allocation):
+            reasons = ["no stock to spare for this store order after the web reserve"]
+        if reasons:
+            self.bus.publish(Event(topics.OMS_OUTBOUND, "order_rejected",
+                                   {"order_id": client_id, "tenant_id": order.tenant_id, "store_id": order.store_id,
+                                    "reasons": reasons, "allocation": [a.as_dict() for a in allocation]},
+                                   self.clock.now(), correlation_id=order.order_id))
+            self._audit("reject_store_order", order.order_id, rationale="; ".join(reasons),
+                        skus=[ln.upc for ln in order.lines], action_key="submit_fulfillment_order",
+                        tenant_id=order.tenant_id)
+            return
+        rec = OrderRecord(
+            order_id=order.order_id, tenant_id=order.tenant_id, client_order_id=client_id, channel="store",
+            store_id=order.store_id, ship_to={**order.ship_to.model_dump(mode="json"), "store_name": order.store_name},
+            window_start=order.window_start, placed_at=order.placed_at, promised_by=order.window_end,
+            delivery_promise_days=(order.window_end - order.placed_at.date()).days,
+            lines=[OrderLine(line_id=a.line_id, upc=a.upc, quantity=a.cases_allocated * a.case_pack)
+                   for a in allocation if a.cases_allocated],
+            allocation=[a.as_dict() for a in allocation],
+        )
+        rec.transitions.append({"state": OrderState.RECEIVED.value, "at": self.clock.now().isoformat()})
+        short = [a for a in allocation if a.short_cases]
+        self._audit("allocate_store_order", rec.order_id, action_key="submit_fulfillment_order",
+                    rationale=(f"{len(short)} of {len(allocation)} lines cut to protect web stock" if short
+                               else "every line allocated in full"),
+                    result={"lines": rec.allocation}, skus=[a.upc for a in allocation], tenant_id=rec.tenant_id)
+        self.bus.publish(Event(topics.OMS_OUTBOUND, "store_order_allocated",
+                               {"order_id": client_id, "tenant_id": rec.tenant_id, "store_id": rec.store_id,
+                                "lines": rec.allocation}, self.clock.now(), correlation_id=rec.order_id))
+        self._submit(rec)
+        self._schedule("order_promise_check", rec.order_id, self.config.promise_check_interval)
+
+    def _store_ineligibility(self, order: StoreOrder) -> list[str]:
+        tenant = self.config.tenant(order.tenant_id)
+        if tenant is None or not tenant.active or "store" not in tenant.channels:
+            return [f"client {order.tenant_id} has no active store contract"]
+        catalog = self.config.catalog(tenant.tenant_id)
+        reasons = [f"UPC {ln.upc} is not in the client's catalog" for ln in order.lines if ln.upc not in catalog]
+        if order.ship_to.country != "US" or order.ship_to.state.upper() not in self.config.states_for(tenant.tenant_id):
+            reasons.append(f"store state {order.ship_to.state} is outside the client's delivery area")
+        return reasons
+
     def _ineligibility(self, order: ConsumerOrder) -> list[str]:
         """Checked against the client's own contract: its catalog, delivery area and delivery promises."""
         tenant = self.config.tenant(order.tenant_id)
@@ -79,9 +139,13 @@ class OrchestrationAgent:
 
     def _submit(self, rec: OrderRecord) -> None:
         rec.submission_attempts += 1
-        pii = ConsumerOrder.model_validate(self.store.get(ORDER_PII, rec.order_id))
-        view = self.governance.view_order(pii, Purpose.FULFILLMENT, requester=AGENT)
-        result = self.integration.create_fulfillment_order(view, agent=AGENT) if view else None
+        if rec.channel == "store":
+            result = self.integration.create_store_fulfillment_order(rec.model_dump(mode="json"), rec.ship_to or {},
+                                                                     agent=AGENT)
+        else:
+            pii = ConsumerOrder.model_validate(self.store.get(ORDER_PII, rec.order_id))
+            view = self.governance.view_order(pii, Purpose.FULFILLMENT, requester=AGENT)
+            result = self.integration.create_fulfillment_order(view, agent=AGENT) if view else None
         rec.ack_timer_id = self._schedule("order_ack_timeout", rec.order_id, self.config.ack_timeout,
                                           attempt=rec.submission_attempts)
         self._save(rec)
@@ -110,6 +174,9 @@ class OrchestrationAgent:
         if event.type == "tracking":
             self._propagate_tracking(rec, event.payload)
             return
+        if event.type == "ship_notice":
+            self._forward_ship_notice(rec, event.payload)
+            return
         if event.type != "status":
             return
         new = OrderState(event.payload["state"])
@@ -135,9 +202,24 @@ class OrchestrationAgent:
         rec.tracking.append({**tracking, "received_at": self.clock.now().isoformat()})
         self._save(rec)
         self.bus.publish(Event(topics.OMS_OUTBOUND, "tracking_update",
-                               {"order_id": rec.client_order_id or rec.order_id, "tenant_id": rec.tenant_id, **tracking},
+                               {"order_id": rec.client_order_id or rec.order_id, "tenant_id": rec.tenant_id,
+                                **({"store_id": rec.store_id} if rec.store_id else {}), **tracking},
                                self.clock.now(), correlation_id=rec.order_id))
         self._audit("propagate_tracking", rec.order_id, action_key="propagate_tracking", tenant_id=rec.tenant_id)
+
+    def _forward_ship_notice(self, rec: OrderRecord, payload: dict[str, Any]) -> None:
+        """The store receives against this: what is on the truck, and when it is booked at the dock."""
+        notice = {k: v for k, v in payload.items() if k != "order_id"}
+        if any(n.get("asnId") == notice.get("asnId") for n in rec.ship_notices):
+            return
+        rec.ship_notices.append({**notice, "received_at": self.clock.now().isoformat()})
+        self._save(rec)
+        self.bus.publish(Event(topics.OMS_OUTBOUND, "advance_ship_notice",
+                               {"order_id": rec.client_order_id or rec.order_id, "tenant_id": rec.tenant_id,
+                                "store_id": rec.store_id, **notice}, self.clock.now(), correlation_id=rec.order_id))
+        self._audit("forward_ship_notice", rec.order_id, action_key="propagate_tracking", tenant_id=rec.tenant_id,
+                    result={"asn": notice.get("asnId"), "pallets": notice.get("pallets"),
+                            "appointment": notice.get("appointment")})
 
     # ---------------------------------------------------------------- promise monitoring (R5.4, R5.5, R5.10)
 

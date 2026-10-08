@@ -66,8 +66,8 @@ class ReconciliationAgent:
 
     def _scope_problems(self, ev: InventoryEvent) -> list[str]:
         out = []
-        if ev.sku not in self.config.pilot_upcs:
-            out.append(f"sku {ev.sku} is outside the pilot catalog")
+        if self.config.tenant_of_sku(ev.sku) is None:
+            out.append(f"sku {ev.sku} is in no client's catalog")
         for field in ("node_id", "to_node"):
             node = getattr(ev, field)
             if node is not None and node not in self.config.nodes:
@@ -117,11 +117,14 @@ class ReconciliationAgent:
         elif ev.type == T.PHYSICAL_COUNT:
             st["physical"] = {"qty": ev.quantity, "counted_at": ev.occurred_at.isoformat()}
         st["updated_at"] = self.clock.now().isoformat()
+        st["tenant_id"] = self.config.tenant_of_sku(ev.sku)
         self.store.put(STATE, state_key(ev.sku, ev.node_id), st)
         return changed
 
     def _transmit_decant_counts(self, node_id: str) -> None:
-        counts = [{"sku": s["sku"], "on_hand": s["on_hand"]} for s in self.store.query(STATE, node_id=node_id)]
+        # Decant counts go to Corp B, so they carry Corp B's items only.
+        counts = [{"sku": s["sku"], "on_hand": s["on_hand"]} for s in self.store.query(STATE, node_id=node_id)
+                  if s["sku"] in self.config.pilot_upcs]
         self.bus.publish(Event(topics.CORPB_OUTBOUND, "decant_counts",
                                {"node_id": node_id, "as_of": self.clock.now().isoformat(), "counts": counts},
                                self.clock.now(), correlation_id=node_id))
@@ -175,7 +178,8 @@ class ReconciliationAgent:
     def run_daily(self) -> dict[str, Any]:
         now = self.clock.now()
         reconciled, discrepancies, unreconciled = 0, [], []
-        for sku in sorted(self.config.pilot_upcs):
+        every_client = set(self.config.pilot_upcs).union(*self.config.tenant_upcs.values())
+        for sku in sorted(every_client):
             for node_id in self.config.nodes:
                 st = self.store.get(STATE, state_key(sku, node_id))
                 phys = (st or {}).get("physical")
@@ -204,7 +208,7 @@ class ReconciliationAgent:
         self.notifier.send(contact, f"Inventory discrepancy {d['sku']} at {d['node_id']}", json.dumps(d),
                            severity="high")
         self.audit.decision(AGENT, "discrepancy_alert", result=d, skus=[d["sku"]], node_ids=[d["node_id"]],
-                            owning_party=OwningParty.CORP_A)
+                            owning_party=OwningParty.CORP_A, tenant_id=self.config.tenant_of_sku(d["sku"]))
 
     # ---------------------------------------------------------------- helpers
 
