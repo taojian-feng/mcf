@@ -319,7 +319,8 @@ class AcsEmailNotifier:
 
     def __init__(self, endpoint: str, sender: str, directory: AppConfigDirectory, credential=None):
         from azure.communication.email import EmailClient
-        self._client = EmailClient(endpoint, credential or _credential())
+        # Few retries: a throttled send is logged and dropped rather than holding up the agent or job.
+        self._client = EmailClient(endpoint, credential or _credential(), retry_total=2, retry_backoff_max=10)
         self._sender, self._directory, self._log = sender, directory, LogNotifier()
 
     def send(self, recipient: str, subject: str, body: str, *, severity: str = "info") -> None:

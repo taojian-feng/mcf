@@ -179,3 +179,13 @@ def test_the_corp_c_sim_sends_forecasts_and_sales():
     sim.tick()
     assert len(drops["forecast"]) == 2 and "sales" in drops
     assert all(r["upc"] in sim.by_upc for r in drops["forecast"][0]["records"])
+
+
+def test_a_set_aside_forecast_is_caught_up_once(world):
+    conn = PartnerConnectors(world, corpb_url=None, secret=lambda name: "x")
+    for name, units in (("f0", 700), ("f1", 14)):                  # f0 is older and must not win
+        rows = [{"upc": C_UPC, "region": "west", "week_start": week(world), "units": units}]
+        world.ports.blobs.write("landing", f"corpc/forecast/{name}.json", json.dumps({"records": rows}).encode())
+    assert conn.catch_up_planning_feeds() == ["corpc/forecast/f1.json"]
+    assert world.planning.daily_demand(C_UPC, "west") == 2.0
+    assert conn.catch_up_planning_feeds() == []

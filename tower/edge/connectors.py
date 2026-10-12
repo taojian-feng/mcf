@@ -200,6 +200,27 @@ class PartnerConnectors:
             applied.append(path)
         return applied
 
+    def catch_up_planning_feeds(self) -> list[str]:
+        """Process each client's newest cold-start, forecast and sales file if it was never processed (one set
+        aside by an older build that could not plan for that client, say). Only the newest: an older file would
+        overwrite a newer plan."""
+        listing = getattr(self.system.ports.blobs, "list", None)
+        store, applied = self.system.ports.store, []
+        if listing is None:
+            return applied
+        for tenant in list(self.system.config.tenants.values()):
+            for kind in ("cold_start", "forecast", "sales"):
+                paths = sorted(listing("landing", f"{tenant.feed_folder}/{kind}/"))
+                if not paths or store.get("planning_meta", feed_done_key(paths[-1])):
+                    continue
+                path = paths[-1]
+                self.on_feed(Event(topics.FEEDS_ARRIVED, "Microsoft.Storage.BlobCreated",
+                                   {"subject": f"/blobServices/default/containers/landing/blobs/{path}"},
+                                   self.system.ports.clock.now()))
+                log.warning("client %s: caught up unprocessed %s", tenant.tenant_id, path)
+                applied.append(path)
+        return applied
+
     def apply_catalog(self, records: list[dict[str, Any]], feed_id: str, tenant_id: str = TENANT_ONE) -> None:
         """A client's item master: the UPCs in scope and their unit costs (used for replenishment value)."""
         upcs = sorted({r["upc"] for r in records if isinstance(r.get("upc"), str) and len(r["upc"]) == 12})

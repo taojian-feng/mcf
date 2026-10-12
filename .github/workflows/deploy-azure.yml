@@ -185,7 +185,7 @@ jobs:
           job="$PREFIX-reconciliation-daily"
           run=$(az containerapp job start -g "$RG" -n "$job" --query name -o tsv)
           echo "started $run"
-          for i in $(seq 1 60); do
+          for i in $(seq 1 120); do   # the daily job reads every client's stock; it takes several minutes
             status=$(az containerapp job execution show -g "$RG" -n "$job" --job-execution-name "$run" --query properties.status -o tsv)
             echo "$status"
             case "$status" in
@@ -194,7 +194,7 @@ jobs:
             esac
             sleep 10
           done
-          echo "::error::Job $run did not finish in 10 minutes"; exit 1
+          echo "::error::Job $run did not finish in 20 minutes"; exit 1
 
       - name: Summary
         if: always()

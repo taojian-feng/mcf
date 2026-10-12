@@ -84,8 +84,9 @@ def test_daily_reconciliation(system):
     assert report["reconciled"] == 2
     assert report["discrepancies"] == [{"sku": UPC, "node_id": "FC-EAST", "expected": 30, "observed": 24}]  # R2.4
     assert report["unreconciled"] == [{"sku": UPC, "node_id": "IXD-1"}]       # R2.8
-    subjects = [m["subject"] for m in system.ports.notifier.to("fops@corpa")]
-    assert any("discrepancy" in s for s in subjects) and any("Daily reconciliation" in s for s in subjects)
+    [mail] = system.ports.notifier.to("fops@corpa")                         # one email, every discrepancy in it
+    assert mail["subject"].endswith(": 1 discrepancy") and mail["severity"] == "high" and '"FC-EAST"' in mail["body"]
+    assert [r for r in system.audit.query(actor="reconciliation_agent") if r.action == "discrepancy_alert"]
 
 
 # ================================================================ Planning (R1)
