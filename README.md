@@ -23,6 +23,7 @@ See [docs/DEPLOY_AZURE.md](docs/DEPLOY_AZURE.md): a one-time Cloud Shell setup s
 | Returns | done: return policy, RMA and label, tracking, grading, refund decision, disposition, label expiry | roadmap step 6 |
 | Operator copilot and briefs | done: a brief on every approval (Claude, rules fallback); "Ask the tower" page with read-only, per-client tools; copilot evaluation | roadmap step 7 |
 | Client onboarding and billing | done: onboarding agent (checks against the network, Corp A approval, derived keys, welcome, go-live tracking), catalog upload API, Corp A's rate card, daily charges, monthly invoices approved by Corp A | roadmap step 8 |
+| Planning for every client | done: demand plans, restock, rebalancing, aged-stock decisions, daily metrics and weekly/quarterly reviews per client, each inside its own data fence; Corp C sends forecasts and sales | after step 8 |
 | Audit_Service | done | R10.1, R10.2, R10.3, R10.5, R10.6, R10.7 |
 | Approval_Workflow | done | R8.1 to R8.8 |
 | Data_Governance_Service | done (isolation + masking) | R9.1, R9.2, R9.4, R9.6, R9.7, R9.8 |

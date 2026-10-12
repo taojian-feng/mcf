@@ -92,7 +92,11 @@ with `X-Api-Key`. Body: `{"event_id", "type", "payload", "occurred_at"}`. Types 
 ## Corp C to the Control Tower
 
 Corp C's website sends consumer orders to `POST {gateway}/v1/orders` exactly as Corp B does (3-day promise
-only). Its catalog goes to `corpc/catalog/`; each record also has `case_pack`.
+only). Its catalog goes to `corpc/catalog/`; each record also has `case_pack`. Its `cold_start`, `forecast`
+and `sales` files follow Corp B's format under `corpc/<type>/`; its sales are last week's demand on Corp A's
+network (web units plus store cases times case pack), by region. Each client's files are planned for that
+client only, and records for another client's items are ignored. A daily `metrics_feed` event (the day's
+metrics file) reaches Corp C with its order updates.
 
 Its stores send replenishment orders to `POST {gateway}/v1/store-orders` with `X-Api-Key`, only allowed for
 clients whose contract lists the `store` channel (else `403`):

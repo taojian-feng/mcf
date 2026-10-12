@@ -280,7 +280,7 @@ def test_daily_metrics_and_export(system):
     assert m["per_unit_fulfillment_cost"]["value"] == 9.0 and m["pct_ground_transport"]["value"] == 1.0
     assert m["days_of_cover"]["value"] == 10.0
     assert m["forecast_accuracy"]["status"] == "incomplete"                   # R6.6 no sales feed yet
-    assert any("Incomplete pilot metrics" in x["subject"] for x in system.ports.notifier.to("ops-team"))
+    assert any("Incomplete metrics for Corp B" in x["subject"] for x in system.ports.notifier.to("ops-team"))
     assert doc["baseline_not_established"]                                    # R6.7
     csv_body = system.ports.blobs.read("exports", f"metrics/{day}.csv").decode()   # R6.4
     assert "on_time_delivery_rate,0.5,ok" in csv_body
