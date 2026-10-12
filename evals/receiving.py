@@ -84,7 +84,8 @@ def collect(*, days: int, catalog_size: int, seed: int) -> list[Case]:
     """Run the world (rules decide live, so nothing depends on Claude) and record every case."""
     from evals.world import build_world
     with build_world(catalog_size=catalog_size, orders_per_day=20, corpc=True, corpc_size=24, seed_c=seed,
-                     truck_fates=HOT_FATES, miscount_scale=MISCOUNT_SCALE) as w:
+                     truck_fates=HOT_FATES, miscount_scale=MISCOUNT_SCALE,
+                     config_overrides={"receiving_review": "rules"}) as w:
         for _ in range(days):
             w.run(hours=24, step_min=20)
             w.system.run_job("reconciliation_daily")

@@ -144,7 +144,7 @@ class PilotConfig(BaseModel):
     #   rules   from the store's report alone (damaged: the carrier; short or wrong item: the warehouse)
     #   claude  Claude weighs the report with the ship notice, the carrier's delivery note, the warehouse's
     #           next count and the store's history (rules when Claude is unavailable)
-    receiving_review: str = Field(default="rules", pattern="^(rules|claude)$")
+    receiving_review: str = Field(default="claude", pattern="^(rules|claude)$")
     receiving_confidence: float = 0.7          # below this a person decides
     receiving_credit_approval_usd: float = 300  # credits above this need Corp A's approval
 
