@@ -25,7 +25,7 @@ env:
 jobs:
   eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: azure/login@v2
         with:
@@ -33,24 +33,69 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Run the evaluation job
+      # Azure sign-ins from GitHub last about an hour, and the planning evaluation runs longer: the wait is
+      # split into 40-minute steps with a fresh sign-in before each.
+      - name: Start the evaluation job
         run: |
           started=$(date -u +%Y%m%dT%H%M%SZ); echo "STARTED=$started" >> "$GITHUB_ENV"
           run=$(az containerapp job start -g "$RG" -n "$JOB" --query name -o tsv)
-          echo "started $run"
-          for i in $(seq 1 480); do
-            status=$(az containerapp job execution show -g "$RG" -n "$JOB" --job-execution-name "$run" --query properties.status -o tsv)
+          echo "RUN=$run" >> "$GITHUB_ENV"; echo "started $run"
+          cat > wait.sh <<'SH'
+          #!/bin/bash
+          for i in $(seq 1 240); do
+            status=$(az containerapp job execution show -g "$RG" -n "$JOB" --job-execution-name "$RUN" --query properties.status -o tsv)
             case "$status" in
-              Succeeded) echo "Succeeded"; exit 0 ;;
-              Failed|Stopped|Degraded) echo "::error::Job $run ended $status. Logs: az containerapp job logs show -g $RG -n $JOB --execution $run --container eval"; exit 1 ;;
+              Succeeded) echo "Succeeded"; echo "DONE=1" >> "$GITHUB_ENV"; exit 0 ;;
+              Failed|Stopped|Degraded) echo "::error::Job $RUN ended $status. Logs: az containerapp job logs show -g $RG -n $JOB --execution $RUN --container eval"; exit 1 ;;
             esac
             [ $((i % 6)) -eq 0 ] && echo "$status"
             sleep 10
           done
-          echo "::error::Job $run did not finish in 80 minutes"; exit 1
+          SH
+          chmod +x wait.sh
+
+      - uses: azure/login@v2
+        if: env.DONE != '1'
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Wait for the evaluation job (up to 40 minutes per sign-in)
+        if: env.DONE != '1'
+        run: ./wait.sh
+
+      - uses: azure/login@v2
+        if: env.DONE != '1'
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Wait for the evaluation job (up to 40 minutes per sign-in)
+        if: env.DONE != '1'
+        run: ./wait.sh
+
+      - uses: azure/login@v2
+        if: env.DONE != '1'
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Wait for the evaluation job (up to 40 minutes per sign-in)
+        if: env.DONE != '1'
+        run: ./wait.sh
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Show the report
         run: |
+          [ "$DONE" = 1 ] || { echo "::error::Job $RUN did not finish in two hours"; exit 1; }
           account=$(az storage account list -g "$RG" --query "[?starts_with(name, 'mcfpilotst')] | [0].name" -o tsv)
           name=$(az storage blob list --auth-mode login --account-name "$account" -c reports --prefix "evals/$EVAL-" \
                    --query "sort_by([], &name)[-1].name" -o tsv)
