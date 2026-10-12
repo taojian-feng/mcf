@@ -34,7 +34,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tower.core import topics
-from tower.core.models import ConsumerOrder, ReturnRequest, StoreOrder, UnhappyPathSignal
+from tower.core.models import ConsumerOrder, ReturnRequest, StoreOrder, StoreReceipt, UnhappyPathSignal
 from tower.core.ports import BlobStore, Clock, Event, MessageBus
 from tower.core.tenants import Tenant, default_tenants
 from tower.services.client_keys import MASTER_SECRET, api_key as issued_api_key
@@ -148,6 +148,29 @@ class Gateway:
         self.bus.publish(Event(topics.ORDERS_RECEIVED, "store_order_received", order.model_dump(mode="json"),
                                self.clock.now(), event_id=f"ord_{order.order_id}", correlation_id=order.order_id))
         return {"accepted": True, "order_id": client_id}
+
+    def receive_store_receipt(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
+        """A store's receiving report: what its back room counted off a delivery, against the ship notice."""
+        tenant, body = self._caller(api_key, body, "store")
+        body.pop("client_receipt_id", None)
+        receipt = self._parse(StoreReceipt, body)
+        problems = []
+        if not receipt.lines:
+            problems.append("lines: one or more")
+        if len({ln.upc for ln in receipt.lines}) != len(receipt.lines):
+            problems.append("lines: one line per item")
+        problems += [f"lines: {ln.upc} has more damaged units than received" for ln in receipt.lines
+                     if ln.damaged_units > ln.received_units]
+        if problems:
+            raise GatewayError(422, "receipt failed validation", problems)
+        client_id, client_order = receipt.receipt_id, receipt.order_id
+        receipt = receipt.model_copy(update={
+            "tenant_id": tenant.tenant_id, "client_receipt_id": client_id, "client_order_id": client_order,
+            "order_id": tenant.fulfillment_id(client_order), "receipt_id": tenant.fulfillment_id(client_id),
+            "recount_of": tenant.fulfillment_id(receipt.recount_of) if receipt.recount_of else None})
+        self.bus.publish(Event(topics.RECEIVING_REPORTS, "store_receipt", receipt.model_dump(mode="json"),
+                               self.clock.now(), event_id=f"rcv_{receipt.receipt_id}", correlation_id=receipt.order_id))
+        return {"accepted": True, "receipt_id": client_id}
 
     def receive_return(self, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
         tenant, body = self._caller(api_key, body, "online")
@@ -313,6 +336,13 @@ def create_app(gateway: Gateway) -> Starlette:
             return JSONResponse({"error": "body is not JSON"}, 400)
         return await _run(gateway.receive_store_order, request.headers.get("x-api-key", ""), body)
 
+    async def store_receipts(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "body is not JSON"}, 400)
+        return await _run(gateway.receive_store_receipt, request.headers.get("x-api-key", ""), body)
+
     async def returns(request: Request) -> JSONResponse:
         try:
             body = await request.json()
@@ -346,6 +376,7 @@ def create_app(gateway: Gateway) -> Starlette:
                                                   "time": datetime.now(timezone.utc).isoformat()})),
         Route("/v1/orders", orders, methods=["POST"]),
         Route("/v1/store-orders", store_orders, methods=["POST"]),
+        Route("/v1/store-receipts", store_receipts, methods=["POST"]),
         Route("/v1/returns", returns, methods=["POST"]),
         Route("/v1/catalog", catalog, methods=["POST"]),
         Route("/v1/mcf/notifications", notifications, methods=["POST"]),

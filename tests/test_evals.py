@@ -84,3 +84,21 @@ def test_planning_evaluation_runs_every_arm_on_a_short_window():
     assert by_arm["sensing"].demand_calls > 0 and by_arm["claude"].calls > 0
     text = report(results, scenario(30, START, 15), days=3, orders_per_day=150, model="fake")
     assert "| claude |" in text and "take-off" in text
+
+
+def test_receiving_evaluation_scores_rules_and_claude_on_the_same_cases():
+    from evals import receiving as ev
+    from tower.adapters.memory import ScriptedLLM
+    from tower.core.config import PilotConfig
+    cases = ev.collect(days=12, catalog_size=12, seed=7)
+    assert cases and {c.truth for c in cases} <= set(ev.TRUTH.values())
+    config = PilotConfig(receiving_review="claude")
+    llm = ScriptedLLM(structured_outputs={"ReceivingCall": {"cause": "store_count_error", "confidence": 0.9,
+                                                            "rationale": "clean POD"}})
+    rules = ev.score("rules", cases, None, config.receiving_confidence)
+    claude = ev.score("claude", cases, ev._offline_agent(config, llm), config.receiving_confidence)
+    assert rules.n == claude.n == len(cases) and len(llm.seen) == len(cases)
+    really_short = sum(c.truth != "store_count_error" for c in cases)
+    assert claude.shorted_store_recounts == really_short and claude.credits_given_away == 0
+    text = ev.report([rules, claude], cases, days=12, model=None, threshold=config.receiving_confidence)
+    assert "| rules |" in text and "| claude |" in text

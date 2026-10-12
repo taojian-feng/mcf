@@ -23,6 +23,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from sim import catalog, geo
+from sim.common.freight import CARRIER_FATES, TRUCK_FATES, truck_outcome
 from sim.common.store import SimStore
 from sim.common.web import Sender, sign, urllib_sender
 
@@ -63,8 +64,9 @@ class CorpA:
     def __init__(self, store: SimStore, clock, *, webhook_url: str, webhook_secret: str,
                  send: Sender = urllib_sender, rng: random.Random | None = None, speed: float = 1.0,
                  shrink_rate: float = 0.0005, catalog_seed: int = 2026, catalog_size: int = catalog.PILOT_SIZE,
-                 corpc_size: int = catalog.CORPC_SIZE):
+                 corpc_size: int = catalog.CORPC_SIZE, truck_fates=TRUCK_FATES):
         self.store, self.clock = store, clock
+        self.truck_fates = truck_fates
         self.webhook_url, self.webhook_secret, self.send = webhook_url, webhook_secret, send
         self.rng = rng or random.Random()
         self.speed = speed
@@ -400,7 +402,8 @@ class CorpA:
                 self._status_note(o, now)
         elif step == "deliver":
             self._set_status(o, "DELIVERED", now)
-            self._track(o, "DELIVERED", now, "Delivered to store receiving, POD signed" if o.get("b2b")
+            self._track(o, "DELIVERED", now, ((o.get("truck") or {}).get("pod_note")
+                                              or "Delivered to store receiving, POD signed clean") if o.get("b2b")
                         else "Delivered, front door")
             o["step"], o["next_at"] = None, None
         elif step == "declare_lost":
@@ -475,8 +478,10 @@ class CorpA:
                                               "casePack": ln["case_pack"], "unitsShipped": 0, "casesShipped": 0})
             d["unitsShipped"] += ln["qty"]
             d["casesShipped"] += ln["qty"] // ln["case_pack"]
+        asn_id = f"ASN{uuid.uuid4().hex[:10].upper()}"
+        self._load_truck(o, asn_id, list(by_sku.values()))
         self._notify("ADVANCE_SHIP_NOTICE", {
-            "sellerFulfillmentOrderId": o["sfo_id"], "asnId": f"ASN{uuid.uuid4().hex[:10].upper()}",
+            "sellerFulfillmentOrderId": o["sfo_id"], "asnId": asn_id,
             "carrier": carrier, "proNumber": pro, "billOfLading": bol, "appointment": _iso(appt),
             "pallets": pallets, "lines": list(by_sku.values()), "shippedAt": _iso(now),
         })
@@ -493,6 +498,23 @@ class CorpA:
         for p in o["packages"]:
             self._send_tracking(o, p, "SHIPPED", now)
         o["step"], o["next_at"] = "deliver", _iso(max(appt, now + timedelta(hours=12)))
+
+    def _load_truck(self, o: dict[str, Any], asn_id: str, asn_lines: list[dict[str, Any]]) -> None:
+        """What really went on the truck (sim.common.freight). A case left on the shelf, or grabbed by
+        mistake, is still in (or missing from) the building: the next physical count finds it, and inventory
+        control books the variance afterwards, as it does for shrink."""
+        o["truck"] = truck = truck_outcome(asn_id, asn_lines, self.truck_fates)
+        node_of = {}
+        for ln in o["lines"]:
+            node_of.setdefault(ln["sku"], ln["node"])
+        meta = self.store.get("meta:variances") or {"id": "meta:variances", "doc_type": "meta", "pending": []}
+        for sku, units in truck["loaded"].items():
+            left_behind = int(sum(ln["unitsShipped"] for ln in asn_lines if ln["sellerSku"] == sku)) - units
+            if left_behind and sku in node_of:
+                self._adjust(sku, node_of[sku], left_behind)
+                meta["pending"].append({"sku": sku, "node": node_of[sku], "qty": left_behind})
+        if meta["pending"]:
+            self.store.put(meta)
 
     # ---------------------------------------------------------------- consumer returns
 
@@ -703,6 +725,12 @@ class CorpA:
                     adjustments.append(self._inv_event("adjustment", d["sku"], d["node"], -lost, now + timedelta(hours=6)))
             counts.append(self._inv_event("physical_count", d["sku"], d["node"], qty, now))
         self._inventory_events(counts)
+        variances = self.store.get("meta:variances")
+        for v in (variances or {}).get("pending") or []:
+            adjustments.append(self._inv_event("adjustment", v["sku"], v["node"], v["qty"], now + timedelta(hours=6)))
+        if variances and variances["pending"]:
+            variances["pending"] = []
+            self.store.put(variances)
         if adjustments:
             self._inventory_events(adjustments, not_before=now + timedelta(hours=6))
         log.info("snapshot: %d counts, %d shrink adjustments", len(counts), len(adjustments))
@@ -799,6 +827,14 @@ class CorpA:
             order["history"].append({"reship": new_id, "at": _iso(now)})
             self.store.put(order)
             return {"reshipped": code in (200, 202), "reshipmentOrderId": new_id}
+        if action == "freight_claim":
+            if not order:
+                return {"filed": False, "reason": "order_not_found"}
+            pkg = (order.get("packages") or [{}])[0]
+            carriers = (order.get("truck") or {}).get("fate") in CARRIER_FATES
+            return {"filed": True, "claim_number": f"FCL{uuid.uuid4().hex[:8].upper()}", "carrier": pkg.get("carrier"),
+                    "carrier_response": "accepted" if carriers else
+                    "declined: the carrier's records show every case on the notice delivered"}
         if action == "return_intercept":
             return {"intercept_requested": True, "carrier_reference": f"RI{uuid.uuid4().hex[:8].upper()}"}
         if action == "execute_transfer" and {"sku", "from", "to", "qty"} <= ctx.keys():

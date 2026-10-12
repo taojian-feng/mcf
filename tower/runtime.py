@@ -12,6 +12,7 @@ from tower.agents.exception import Classifier, ExceptionAgent
 from tower.agents.onboarding import OnboardingAgent
 from tower.agents.orchestration import OrchestrationAgent
 from tower.agents.planning import PlanningAgent
+from tower.agents.receiving import ReceivingAgent
 from tower.agents.reconciliation import ReconciliationAgent
 from tower.agents.reporting import ReportingAgent
 from tower.agents.returns import ReturnsAgent
@@ -72,6 +73,7 @@ class System:
     returns: ReturnsAgent
     onboarding: OnboardingAgent
     billing: BillingAgent
+    receiving: ReceivingAgent
 
     def run_job(self, name: str) -> object:
         """Scheduled jobs (Container Apps Jobs on Azure)."""
@@ -118,8 +120,10 @@ def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] |
                                  ports.clock, config, gateway_url=ports.gateway_url)
     billing = BillingAgent(ports.store, ports.bus, ports.blobs, approvals, audit, ports.notifier, ports.directory,
                            ports.clock, config)
+    receiving = ReceivingAgent(ports.store, ports.bus, approvals, handoffs, audit, ports.notifier, ports.directory,
+                               ports.clock, config, llm=ports.llm)
     return System(ports, config, audit, governance, integration, approvals, handoffs, orchestration, exceptions,
-                  reconciliation, planning, disposition, reporting, returns, onboarding, billing)
+                  reconciliation, planning, disposition, reporting, returns, onboarding, billing, receiving)
 
 
 def memory_ports(**overrides: Any) -> Ports:
