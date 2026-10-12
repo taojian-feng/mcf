@@ -66,6 +66,7 @@ var topics = [
   'shipments.facts'
   'corpb.outbound'
   'returns.events'
+  'receiving.reports'
 ]
 // subscriber -> topics it consumes (mirrors bus.subscribe calls in mcf/)
 var subscriptions = [
@@ -84,6 +85,7 @@ var subscriptions = [
   { name: 'returns-agent', topics: [ 'returns.events', 'timers' ] }
   { name: 'onboarding-agent', topics: [ 'approvals.decisions' ] }
   { name: 'billing-agent', topics: [ 'approvals.decisions' ] }
+  { name: 'receiving-agent', topics: [ 'receiving.reports', 'approvals.decisions' ] }
 ]
 var subscriptionPairs = flatten(map(subscriptions, s => map(s.topics, t => { sub: s.name, topic: t })))
 var containers = [
@@ -113,6 +115,8 @@ var containers = [
   { name: 'clients', ttl: -1 }
   { name: 'charges', ttl: -1 }
   { name: 'invoices', ttl: -1 }
+  { name: 'store_receipts', ttl: -1 }
+  { name: 'receiving_claims', ttl: -1 }
 ]
 
 // ------------------------------------------------------------------ identity + observability
@@ -610,6 +614,34 @@ resource evalPlanningJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
         image: image
         command: [ 'python', '-m', 'evals.planning', '--arms', 'all' ]
         resources: { cpu: json('2.0'), memory: '4Gi' }
+        env: commonEnv
+      } ]
+    }
+  }
+  dependsOn: [ roleAcr ]
+}
+
+// Store receiving evaluation: runs Corp C's stores with frequent truck mishaps, then has rules and Claude name the
+// cause of each short or damaged delivery. Started by hand: az containerapp job start -g <rg> -n <prefix>-eval-receiving.
+resource evalReceivingJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
+  name: '${prefix}-eval-receiving'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
+  properties: {
+    environmentId: cae.id
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 3600
+      replicaRetryLimit: 0
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: registries
+    }
+    template: {
+      containers: [ {
+        name: 'eval'
+        image: image
+        command: [ 'python', '-m', 'evals.receiving', '--arms', 'all' ]
+        resources: { cpu: json('1.0'), memory: '2Gi' }
         env: commonEnv
       } ]
     }

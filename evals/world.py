@@ -90,10 +90,12 @@ def build_world(*, catalog_size: int = 30, orders_per_day: int = 200, seed_a: in
                 corpc_size: int = 24, corpc_web_per_day: float = 60, seed_c: int = 7,
                 returns: bool = False, return_rate: float = 0.08, briefs: bool = False,
                 demand_shifts: list[dict[str, Any]] | None = None, bulk_orders: list[dict[str, Any]] | None = None,
-                config_overrides: dict[str, Any] | None = None) -> World:
+                config_overrides: dict[str, Any] | None = None, truck_fates=None,
+                miscount_scale: float = 1.0) -> World:
     clock = VirtualClock(START)
     categories = ("exception_resolution", "disposition", "replenishment", "distribution_plan")
-    roles = {"alice@corpb": {f"approver:{c}:corp_b" for c in categories}}
+    roles = {"alice@corpb": {f"approver:{c}:corp_b" for c in categories},
+             "ann@corpa": {"approver:receiving_claim:corp_a"}}
     tenants = default_tenants()
     if corpc:
         roles["cora@corpc"] = {f"approver:{c}:corp_c" for c in categories}
@@ -116,7 +118,8 @@ def build_world(*, catalog_size: int = 30, orders_per_day: int = 200, seed_a: in
 
     corpa = CorpA(MemoryStore(), clock, webhook_url="https://gateway/v1/mcf/notifications",
                   webhook_secret=SECRETS["partner-corpa-webhook-secret"], send=_client_sender(gw),
-                  rng=random.Random(seed_a), catalog_size=catalog_size, corpc_size=corpc_size)
+                  rng=random.Random(seed_a), catalog_size=catalog_size, corpc_size=corpc_size,
+                  **({"truck_fates": truck_fates} if truck_fates is not None else {}))
     corpa_http = TestClient(corpa_app(corpa, Tokens(SECRETS["mcf-client-id"], SECRETS["mcf-client-secret"]),
                                       faults=(0, 0, 0), clock_s=wall)).__enter__()
     ports.mcf = HttpMCFTransport("https://corpa", _Secrets(), opener=_client_sender(corpa_http), clock=wall)
@@ -140,7 +143,8 @@ def build_world(*, catalog_size: int = 30, orders_per_day: int = 200, seed_a: in
         corpc_sim = CorpC(MemoryStore(), clock, gateway_url="https://gateway", api_key=SECRETS["partner-corpc-api-key"],
                           upload=upload, send=_client_sender(gw), rng=random.Random(seed_c),
                           web_orders_per_day=corpc_web_per_day, catalog_size=corpc_size,
-                          return_rate=return_rate if returns else 0.0)
+                          return_rate=return_rate if returns else 0.0, miscount_scale=miscount_scale,
+                          **({"truck_fates": truck_fates} if truck_fates is not None else {}))
         clients["corpc"] = TestClient(corpc_app(corpc_sim, SECRETS["corpc-inbound-api-key"])).__enter__()
 
     def post(url, headers, body):  # each client's endpoint, by host
