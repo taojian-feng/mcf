@@ -1,5 +1,5 @@
 # Runs an evaluation in Azure dev and shows its report on the run page.
-# Manual only: Actions > Run evaluation (dev) > Run workflow, then pick exceptions or copilot. Deploy first.
+# Manual only: Actions > Run evaluation (dev) > Run workflow, then pick exceptions, copilot or planning. Deploy first.
 name: Run evaluation (dev)
 
 on:
@@ -8,7 +8,7 @@ on:
       eval:
         description: Which evaluation
         type: choice
-        options: [ exceptions, copilot ]
+        options: [ exceptions, copilot, planning ]
         default: exceptions
 
 permissions:

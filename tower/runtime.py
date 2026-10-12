@@ -108,7 +108,7 @@ def build(ports: Ports, config: PilotConfig, *, sleep: Callable[[float], None] |
     reconciliation = ReconciliationAgent(ports.store, ports.bus, audit, ports.notifier, ports.directory, ports.clock,
                                          config)
     planning = PlanningAgent(ports.store, ports.bus, integration, governance, approvals, handoffs, reconciliation,
-                             audit, ports.notifier, ports.directory, ports.clock, config)
+                             audit, ports.notifier, ports.directory, ports.clock, config, llm=ports.llm)
     disposition = DispositionAgent(ports.store, ports.bus, approvals, handoffs, reconciliation, planning, audit,
                                    ports.notifier, ports.directory, ports.clock, config)
     reporting = ReportingAgent(ports.store, ports.bus, ports.blobs, planning, governance, audit, ports.notifier,

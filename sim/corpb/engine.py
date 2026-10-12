@@ -52,7 +52,8 @@ class CorpB:
                  upload: Callable[[str, bytes], None], send: Sender = urllib_sender,
                  rng: random.Random | None = None, orders_per_day: float = 140, speed: float = 1.0,
                  bad_record_rate: float = 0.02, catalog_seed: int = 2026, catalog_size: int = catalog.PILOT_SIZE,
-                 return_rate: float = 0.08,
+                 return_rate: float = 0.08, demand_shifts: list[dict[str, Any]] | None = None,
+                 bulk_orders: list[dict[str, Any]] | None = None,
                  go_live_delay: timedelta = timedelta(minutes=15), forecast_delay: timedelta = timedelta(hours=1)):
         self.store, self.clock, self.gateway_url, self.api_key = store, clock, gateway_url.rstrip("/"), api_key
         self.upload, self.send, self.rng = upload, send, rng or random.Random()
@@ -62,6 +63,9 @@ class CorpB:
         self.non_pilot = catalog.non_pilot_upcs()
         self._city_weights = [c[5] for c in geo.CITIES]
         self._item_weights = {r: [it.weekly_units[r] for it in self.items] for r in catalog.REGIONS}
+        # What the forecast does not know: items that take off or fade from a date ({upc, factor, from, region?}),
+        # and one-off bulk orders ({at, upc, state, qty}). Evaluations use them; the live sim has none.
+        self.demand_shifts, self.bulk_orders = demand_shifts or [], bulk_orders or []
         self.returns = ReturnDesk(store, self.rng, gateway_url=gateway_url, api_key=api_key, send=send,
                                   rate=return_rate, prefix="R")
 
@@ -75,26 +79,54 @@ class CorpB:
             return  # the catalog goes first; consumers can order once the items are live
         elapsed = min(3600.0, (now - datetime.fromisoformat(meta["last_at"])).total_seconds())
         expected = self.orders_per_day / 86400 * elapsed * self.speed * HOURLY[(now.hour - 4) % 24] / _HOURLY_MEAN
-        for _ in range(_poisson(self.rng, expected)):
+        for _ in range(_poisson(self.rng, expected * self._volume(now))):
             self.place_order(now)
+        for i, b in enumerate(self.bulk_orders):
+            if b["at"] <= now and not self.store.get(f"meta:bulk:{i}"):
+                self.place_order(now, state=b["state"], lines={b["upc"]: b["qty"]})
+                self.store.put({"id": f"meta:bulk:{i}", "doc_type": "meta"})
         meta["last_at"] = _iso(now)
         self.store.put(meta)
         self.flush_orders()
         self.returns.flush(now)
 
-    def place_order(self, now: datetime) -> dict[str, Any]:
-        city, state, zipc, *_ = self.rng.choices(geo.CITIES, weights=self._city_weights)[0]
+    def _factor(self, upc: str, region: str, now: datetime) -> float:
+        f = 1.0
+        for s in self.demand_shifts:
+            if s["upc"] == upc and s["from"] <= now and s.get("region") in (None, region):
+                f *= s["factor"]
+        return f
+
+    def _weights(self, region: str, now: datetime) -> list[float]:
+        if not self.demand_shifts:
+            return self._item_weights[region]
+        return [w * self._factor(it.upc, region, now) for w, it in zip(self._item_weights[region], self.items)]
+
+    def _volume(self, now: datetime) -> float:
+        """Shifts change how much is ordered, not only the mix."""
+        if not self.demand_shifts:
+            return 1.0
+        base = sum(sum(self._item_weights[r]) for r in catalog.REGIONS)
+        return sum(sum(self._weights(r, now)) for r in catalog.REGIONS) / base
+
+    def place_order(self, now: datetime, *, state: str | None = None, lines: dict[str, int] | None = None) -> dict[str, Any]:
+        city, st, zipc, *_ = self.rng.choices(
+            [c for c in geo.CITIES if state in (None, c[1])] or geo.CITIES, weights=None if state else self._city_weights)[0]
+        state = st
         region = geo.region_of(state)
         n_lines = self.rng.choices([1, 2, 3], weights=[72, 21, 7])[0]
-        picks = {it.upc for it in self.rng.choices(self.items, weights=self._item_weights[region], k=n_lines)}
-        if self.rng.random() < 0.008:
+        picks = {it.upc for it in self.rng.choices(self.items, weights=self._weights(region, now), k=n_lines)}
+        if lines:
+            picks = set(lines)
+        elif self.rng.random() < 0.008:
             picks.add(self.rng.choice(self.non_pilot))
         first, last = self.rng.choice(FIRST), self.rng.choice(LAST)
         order_id = f"CB{now:%y%m%d}-{uuid.uuid4().hex[:6].upper()}"
         payload = {
             "order_id": order_id, "placed_at": _iso(now),
             "delivery_promise_days": 2 if self.rng.random() < 0.3 else 3,
-            "lines": [{"line_id": str(i + 1), "upc": upc, "quantity": self.rng.choices([1, 2, 3], weights=[85, 12, 3])[0]}
+            "lines": [{"line_id": str(i + 1), "upc": upc,
+                       "quantity": (lines or {}).get(upc) or self.rng.choices([1, 2, 3], weights=[85, 12, 3])[0]}
                       for i, upc in enumerate(sorted(picks))],
             "consumer": {
                 "name": f"{first} {last}",

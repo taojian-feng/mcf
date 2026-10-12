@@ -74,7 +74,7 @@ var subscriptions = [
   { name: 'approval-workflow', topics: [ 'timers' ] }
   { name: 'handoff-tracker', topics: [ 'timers', 'handoffs.updates' ] }
   { name: 'reconciliation-agent', topics: [ 'inventory.events' ] }
-  { name: 'planning-agent', topics: [ 'inventory.state', 'approvals.decisions', 'timers' ] }
+  { name: 'planning-agent', topics: [ 'orders.received', 'inventory.state', 'approvals.decisions', 'timers' ] }
   { name: 'disposition-agent', topics: [ 'approvals.decisions', 'disposition.events', 'timers' ] }
   { name: 'reporting-agent', topics: [ 'shipments.facts' ] }
   { name: 'oms-connector', topics: [ 'oms.outbound' ] }
@@ -582,6 +582,34 @@ resource evalCopilotJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
         image: image
         command: [ 'python', '-m', 'evals.copilot' ]
         resources: { cpu: json('1.0'), memory: '2Gi' }
+        env: commonEnv
+      } ]
+    }
+  }
+  dependsOn: [ roleAcr ]
+}
+
+// Planning evaluation: runs the world once per arm (rules, sensing, Claude) with items that stop following the
+// forecast, and scores lost sales, freight and excess stock. Started by hand: az containerapp job start -g <rg> -n <prefix>-eval-planning.
+resource evalPlanningJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
+  name: '${prefix}-eval-planning'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
+  properties: {
+    environmentId: cae.id
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 7200
+      replicaRetryLimit: 0
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: registries
+    }
+    template: {
+      containers: [ {
+        name: 'eval'
+        image: image
+        command: [ 'python', '-m', 'evals.planning', '--arms', 'all' ]
+        resources: { cpu: json('2.0'), memory: '4Gi' }
         env: commonEnv
       } ]
     }
