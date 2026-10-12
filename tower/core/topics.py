@@ -15,3 +15,4 @@ SHIPMENT_FACTS = "shipments.facts"        # per-package facts from MCF tracking 
 CORPB_OUTBOUND = "corpb.outbound"         # messages to Corp B systems other than OMS (decant counts, alerts feeds)
 FEEDS_ARRIVED = "feeds.arrived"           # a partner file landed in storage (Event Grid BlobCreated)
 RETURNS_EVENTS = "returns.events"         # return requests from clients; return status and grading from Corp A
+RECEIVING_REPORTS = "receiving.reports"   # stores' receiving reports: what arrived against the ship notice

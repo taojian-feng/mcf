@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from sim import catalog, geo
+from sim.common.freight import TRUCK_FATES, truck_outcome
 from sim.common.returns import ReturnDesk
 from sim.common.store import SimStore
 from sim.common.web import Sender, post_json, urllib_sender
@@ -30,6 +31,9 @@ log = logging.getLogger("sim.corpc")
 WEB_SHARE = 1 / 3                 # of each item's demand; the stores sell the rest
 REORDER_WEEKS, ORDER_UP_TO_WEEKS = 1.5, 3.0
 WINDOW_START_DAYS, WINDOW_END_DAYS = 3, 6
+# Receiving: now and then a store's back room counts a case short that is really there. Two stores are
+# sloppier than the rest (new receiving staff).
+MISCOUNT_RATE, SLOPPY_STORES, SLOPPY_RATE = 0.012, ("ST-0104", "ST-0201"), 0.08
 SALES_POSTING_HOUR = 6            # UTC: last night's store sales are booked
 # store id, name, city, state, zip, street, weight (relative store size)
 STORES = [
@@ -57,7 +61,8 @@ class CorpC:
                  upload: Callable[[str, bytes], None], send: Sender = urllib_sender,
                  rng: random.Random | None = None, web_orders_per_day: float = 60, speed: float = 1.0,
                  catalog_size: int = catalog.CORPC_SIZE, go_live_delay: timedelta = timedelta(minutes=15),
-                 return_rate: float = 0.06):
+                 return_rate: float = 0.06, truck_fates=TRUCK_FATES, miscount_scale: float = 1.0):
+        self.truck_fates, self.miscount_scale = truck_fates, miscount_scale
         self.store, self.clock, self.gateway_url, self.api_key = store, clock, gateway_url.rstrip("/"), api_key
         self.upload, self.send, self.rng = upload, send, rng or random.Random()
         self.web_orders_per_day, self.speed, self.go_live_delay = web_orders_per_day, speed, go_live_delay
@@ -189,7 +194,9 @@ class CorpC:
     def flush(self, limit: int = 200) -> int:
         now = self.clock.now()
         sent = 0
-        for doc in self.store.query("order", due_by=_iso(now), status="pending_send")[:limit]:
+        due = (self.store.query("order", due_by=_iso(now), status="pending_send")
+               + self.store.query("receipt", due_by=_iso(now), status="pending_send"))
+        for doc in due[:limit]:
             status, body = post_json(self.send, f"{self.gateway_url}{doc['path']}", doc["payload"],
                                      {"X-Api-Key": self.api_key})
             # The tower may answer (allocation, rejection) before the post returns; keep what it said.
@@ -204,7 +211,7 @@ class CorpC:
                 doc["status"], doc["next_at"] = "refused", None
                 doc["error"] = body[:500].decode(errors="replace")
                 self._release(doc)
-                log.warning("gateway refused %s: %s %s", doc["order_id"], status, doc["error"])
+                log.warning("gateway refused %s: %s %s", doc.get("receipt_id") or doc["order_id"], status, doc["error"])
             else:
                 doc["next_at"] = _iso(now + timedelta(seconds=min(1800, 10 * 2 ** min(doc["attempts"], 7))))
                 doc["error"] = f"{status}"
@@ -224,6 +231,9 @@ class CorpC:
                         "type": body.get("type"), "received_at": _iso(now), "body": body})
         p, kind = body.get("payload") or {}, body.get("type")
         if self.returns.receive(kind, p, now):
+            return
+        if kind in ("receipt_recount_requested", "receipt_resolved", "receipt_under_review"):
+            self._on_receipt_answer(kind, p, now)
             return
         doc = self.store.get(f"order:{p.get('order_id')}") if p.get("order_id") else None
         if not doc:
@@ -251,15 +261,60 @@ class CorpC:
         self.store.put(doc)
 
     def _receive_at_store(self, doc: dict[str, Any]) -> None:
-        """Cases on the ship notice go onto the shelves; whatever was ordered and not shipped is off order."""
+        """The back room unloads the truck and counts it against the ship notice. What really arrived
+        (sim.common.freight) goes onto the shelves, damaged cases aside; whatever was ordered is off order.
+        The count, right or not, goes to the control tower as the store's receiving report."""
         st = self.store.get(f"store:{doc['store_id']}")
-        shipped = {ln["sellerSku"]: ln["unitsShipped"] for ln in (doc.get("ship_notice") or {}).get("lines") or []}
+        notice = doc.get("ship_notice") or {}
+        asn_lines = notice.get("lines") or []
+        truck = truck_outcome(notice.get("asnId") or doc["order_id"], asn_lines, self.truck_fates)
         for ln in doc["payload"]["lines"]:
-            upc, ordered = ln["upc"], ln["cases"] * ln["case_pack"]
-            got = shipped.get(upc, 0)
-            st["stock"][upc] = st["stock"].get(upc, 0) + got
-            st["on_order"][upc] = max(0, st["on_order"].get(upc, 0) - ordered)
+            st["on_order"][ln["upc"]] = max(0, st["on_order"].get(ln["upc"], 0) - ln["cases"] * ln["case_pack"])
+        for upc, units in truck["arrived"].items():
+            st["stock"][upc] = st["stock"].get(upc, 0) + units - truck["damaged"].get(upc, 0)
         self.store.put(st)
+        counted, miscount = dict(truck["arrived"]), None
+        rate = (SLOPPY_RATE if doc["store_id"] in SLOPPY_STORES else MISCOUNT_RATE) * self.miscount_scale
+        if truck["fate"] == "normal" and asn_lines and self.rng.random() < rate:
+            ln = self.rng.choice(sorted(asn_lines, key=lambda x: x["sellerSku"]))
+            miscount = ln["sellerSku"]
+            counted[miscount] -= max(1, int(ln.get("casePack") or 1))
+        self._report_receipt(doc, notice, counted, truck["damaged"],
+                             truth="store_miscount" if miscount else truck["fate"])
+
+    def _report_receipt(self, doc: dict[str, Any], notice: dict[str, Any], counted: dict[str, int],
+                        damaged: dict[str, int], *, truth: str, recount_of: str | None = None) -> None:
+        now = self.clock.now()
+        expected = {ln["sellerSku"]: int(ln["unitsShipped"]) for ln in notice.get("lines") or []}
+        receipt_id = f"RCV-{doc['order_id']}" + ("-R" if recount_of else "")
+        lines = [{"upc": upc, "expected_units": expected.get(upc, 0), "received_units": max(0, counted.get(upc, 0)),
+                  "damaged_units": damaged.get(upc, 0)} for upc in sorted(set(expected) | set(counted))]
+        payload = {"receipt_id": receipt_id, "order_id": doc["order_id"], "store_id": doc["store_id"],
+                   "asn_id": notice.get("asnId"), "received_at": _iso(now), "lines": lines,
+                   **({"recount_of": recount_of} if recount_of else {})}
+        self.store.put({"id": f"receipt:{receipt_id}", "doc_type": "receipt", "receipt_id": receipt_id,
+                        "order_id": doc["order_id"], "store_id": doc["store_id"], "status": "pending_send",
+                        "attempts": 0, "next_at": _iso(now), "path": "/v1/store-receipts", "payload": payload,
+                        "truth": truth, "counted": counted, "damaged": damaged, "answers": []})
+
+    def _on_receipt_answer(self, kind: str, p: dict[str, Any], now: datetime) -> None:
+        """The control tower's answer to a receiving report: a credit, a claim, or please count again. A
+        recount is done properly, so it finds what really arrived."""
+        rec = self.store.get(f"receipt:{p.get('receipt_id')}")
+        if rec is None:
+            return
+        rec["answers"] = rec["answers"][-10:] + [{"type": kind, "at": _iso(now), **{
+            k: p.get(k) for k in ("outcome", "credit_usd", "reason") if k in p}}]
+        self.store.put(rec)
+        if kind != "receipt_recount_requested" or rec["payload"].get("recount_of"):
+            return
+        doc = self.store.get(f"order:{rec['order_id']}")
+        if doc is None or self.store.get(f"receipt:{rec['receipt_id']}-R"):
+            return
+        notice = doc.get("ship_notice") or {}
+        truck = truck_outcome(notice.get("asnId") or doc["order_id"], notice.get("lines") or [], self.truck_fates)
+        self._report_receipt(doc, notice, dict(truck["arrived"]), truck["damaged"], truth=rec["truth"],
+                             recount_of=rec["receipt_id"])
 
     def _release(self, doc: dict[str, Any], keep: dict[str, int] | None = None) -> None:
         """Take cases that will not come off the store's order book (rejected, or cut by allocation)."""

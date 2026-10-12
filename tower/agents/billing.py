@@ -7,6 +7,7 @@ Charges come from records the tower already keeps, so every charge points at wha
   freight     per store freight shipment: carrier cost plus markup           (shipment facts, mode ltl)
   storage     per unit on hand at the end of each day, a month's rate / days  (inventory positions)
   returns     per consumer return Corp A received and graded                  (returns)
+  receiving_credit  a credit (negative) for a store delivery Corp A or its carrier got wrong (receiving claims)
 
 Rates are Corp A's standard card (PilotConfig.default_rates) with any the client's contract overrides.
 Each charge has an id built from what it bills, so running a day twice charges nothing twice.
@@ -37,9 +38,10 @@ AGENT = "billing_agent"
 CHARGES = "charges"
 INVOICES = "invoices"
 FACTS = "shipment_facts"
-KINDS = ("pick_pack", "shipping", "freight", "storage", "returns")
+KINDS = ("pick_pack", "shipping", "freight", "storage", "returns", "receiving_credit")
 LABELS = {"pick_pack": "Pick and pack", "shipping": "Parcel shipping", "freight": "Store freight",
-          "storage": "Storage", "returns": "Returns processing", "minimum": "Monthly minimum top-up"}
+          "storage": "Storage", "returns": "Returns processing",
+          "receiving_credit": "Credits for store deliveries short or damaged", "minimum": "Monthly minimum top-up"}
 log = logging.getLogger("tower.billing")
 
 

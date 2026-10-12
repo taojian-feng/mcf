@@ -142,6 +142,40 @@ class OrderRecord(BaseModel):
     on_time: bool | None = None
 
 
+class ReceiptLine(BaseModel):
+    upc: str
+    expected_units: int = Field(ge=0)     # on the ship notice
+    received_units: int = Field(ge=0)     # counted at the store's dock, damaged units included
+    damaged_units: int = Field(default=0, ge=0)
+
+
+class StoreReceipt(BaseModel):
+    """A store's receiving report: what its back room counted off a delivery, against the ship notice."""
+    receipt_id: str
+    order_id: str
+    store_id: str
+    asn_id: str | None = None
+    received_at: datetime
+    lines: list[ReceiptLine]
+    recount_of: str | None = None          # a second count the tower asked for
+    note: str | None = Field(default=None, max_length=500)
+    tenant_id: str = "corp_b"
+    client_order_id: str | None = None
+    client_receipt_id: str | None = None
+
+    @property
+    def problems(self) -> list[ReceiptLine]:
+        return [ln for ln in self.lines if ln.received_units != ln.expected_units or ln.damaged_units]
+
+
+class ReceivingCause(str, Enum):
+    PICK_ERROR = "pick_error"                  # Corp A's warehouse loaded the wrong cases or left one behind
+    CARRIER_DAMAGE = "carrier_damage"          # the carrier damaged cases on the way
+    CARRIER_LOSS = "carrier_loss"              # the carrier lost cases on the way
+    STORE_COUNT_ERROR = "store_count_error"    # everything arrived; the store's count is off
+    UNCLEAR = "unclear"
+
+
 # ---------------------------------------------------------------- returns
 
 class ReturnReason(str, Enum):
@@ -303,10 +337,12 @@ class ApprovalCategory(str, Enum):
     EXCEPTION_RESOLUTION = "exception_resolution"
     CLIENT_ONBOARDING = "client_onboarding"    # Corp A: take on a new retail client
     INVOICE = "invoice"                        # Corp A: send a client its monthly invoice
+    RECEIVING_CLAIM = "receiving_claim"        # Corp A: credit a client for a store delivery that came up short
 
 
 # Decisions only Corp A makes; a client's people never hold these roles.
-PROVIDER_CATEGORIES = frozenset({ApprovalCategory.CLIENT_ONBOARDING, ApprovalCategory.INVOICE})
+PROVIDER_CATEGORIES = frozenset({ApprovalCategory.CLIENT_ONBOARDING, ApprovalCategory.INVOICE,
+                                 ApprovalCategory.RECEIVING_CLAIM})
 CLIENT_CATEGORIES = tuple(c for c in ApprovalCategory if c not in PROVIDER_CATEGORIES)
 
 

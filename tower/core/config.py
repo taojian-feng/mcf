@@ -103,6 +103,10 @@ class PilotConfig(BaseModel):
             "receive_return": OwningParty.CORP_A,        # carrier pickup, receiving and grading
             "decide_refund": OwningParty.CORP_B,
             "dispose_return": OwningParty.CORP_A,
+            "investigate_receipt": OwningParty.CORP_A,   # a store delivery that came up short or damaged
+            "freight_claim": OwningParty.CORP_A,         # Corp A files with the carrier it hired
+            "credit_client": OwningParty.CORP_A,
+            "recount_receipt": OwningParty.CORP_B,       # the client's store counts again
         }
     )
     approval_briefs: bool = True     # a plain-language brief on every approval (Claude when configured)
@@ -135,6 +139,14 @@ class PilotConfig(BaseModel):
     region_states: dict[str, list[str]] = Field(default_factory=lambda: {
         "west": ["WA", "OR", "CA", "NV", "ID", "MT", "WY", "UT", "CO", "AZ", "NM", "AK", "HI"]})
     default_region: str = "east"               # states not listed above
+
+    # Store receiving problems: who decides why a delivery came up short or damaged
+    #   rules   from the store's report alone (damaged: the carrier; short or wrong item: the warehouse)
+    #   claude  Claude weighs the report with the ship notice, the carrier's delivery note, the warehouse's
+    #           next count and the store's history (rules when Claude is unavailable)
+    receiving_review: str = Field(default="rules", pattern="^(rules|claude)$")
+    receiving_confidence: float = 0.7          # below this a person decides
+    receiving_credit_approval_usd: float = 300  # credits above this need Corp A's approval
 
     # R2 reconciliation
     discrepancy_threshold_units: int = 2

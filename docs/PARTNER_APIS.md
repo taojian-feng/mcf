@@ -117,6 +117,20 @@ to what Corp C can spare: on hand across the network, minus units held by open o
 (the last 14 days' web demand per day times `online_protect_days`), in whole cases. The store hears the result
 first as `store_order_allocated`; if no line gets a case the order is `order_rejected` with the numbers.
 
+**Receiving.** When a delivery is unloaded, the store counts it against the ship notice and sends its
+receiving report to `POST {gateway}/v1/store-receipts` (same key and `store` contract):
+
+```json
+{"receipt_id": "RCV-CCS-ST-0101-261008", "order_id": "CCS-ST-0101-261008", "store_id": "ST-0101",
+ "asn_id": "ASN3F2A9C1B0D", "received_at": "2026-10-13T09:40:00+00:00",
+ "lines": [{"upc": "650000000012", "expected_units": 24, "received_units": 18, "damaged_units": 0}]}
+```
+
+`received_units` counts everything off the truck, damaged units included. One line per item; an item that
+arrived but is not on the notice has `expected_units` 0. A recount the tower asked for is a new report with
+`recount_of` naming the first. `422` when lines repeat an item or damage exceeds what was received. A report that
+matches the notice closes the delivery; any other opens a receiving claim (see Control Tower to Corp C).
+
 ## Consumer returns (both retailers)
 
 `POST {gateway}/v1/returns` with `X-Api-Key`, from a client whose contract has `return_window_days` above 0:
@@ -148,6 +162,18 @@ client to review. The client issues the refund; the tower only says what arrived
 `advance_ship_notice` (`asnId`, `carrier`, `proNumber`, `billOfLading`, `appointment`, `pallets`, and per line
 `sellerSku`, `casesShipped`, `unitsShipped`) and `tracking_update` with `store_id`. Web orders get the same
 updates as Corp B's.
+
+A receiving report that does not match its notice is answered with `receipt_id`, `order_id`, `store_id` and:
+
+| Type | When | Payload |
+|---|---|---|
+| `receipt_resolved` | the cause is settled | `outcome` (`credited` or `no_credit`), `cause`, `credit_usd`, or a `reason` |
+| `receipt_recount_requested` | everything looks to have arrived; please count again | `reason` |
+| `receipt_under_review` | a person at Corp A decides (unclear, or a large credit) | `reason` |
+
+A credit shows on the client's next invoice as a negative "Credits for store deliveries short or damaged" line.
+When the cause is the carrier's, Corp A also files a freight claim with the carrier (an operations case,
+`freight_claim`).
 
 ## Control Tower to Corp A (the MCF API)
 
@@ -209,7 +235,15 @@ and its ops team works cases within 1 to 18 hours, now and then later than promi
 Store orders (B2B) ship whole cases from the region's inbound storage centre first, then the FCs; lines it
 cannot fill are cut. Freight is booked a day ahead and goes LTL with a PRO number, 30 cases to a pallet, on
 a dock appointment inside the store's window (about 6% arrive a day or two late). The ship notice goes out
-when the truck leaves; delivery reads "Delivered to store receiving, POD signed".
+when the truck leaves; delivery reads "Delivered to store receiving, POD signed clean".
+
+Now and then a truckload goes wrong (`sim/common/freight.py`, decided from the ship notice so Corp A and the store
+agree): about 2% carry a wrong case (one item's case swapped for another's on the same order), 2.5% leave a
+case on the warehouse shelf, 2.5% arrive with a crushed case and 1.2% lose a case in the carrier's network.
+Damage, and most losses, are noted on the proof of delivery; a case left behind or grabbed by mistake shows up
+in Corp A's next nightly count and is booked as an adjustment that morning, like shrink. Separately, about 1%
+of store counts are a case short when everything arrived (8% at two stores with new receiving staff); a recount
+finds the case.
 
 About 8% of Corp B's delivered web orders and 6% of Corp C's come back (settings `CORPB_RETURN_RATE`,
 `CORPC_RETURN_RATE` on the simulators): one item, asked for half a day to twelve days after delivery, and 3% too
