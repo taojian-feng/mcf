@@ -96,19 +96,30 @@ ILLEGAL_ID_CHARS = "/\\?#"
 
 
 class InMemoryStore:
+    # Collections that exist, when set (the tests set it from the Cosmos DB containers the deployment
+    # declares): any other one fails, as Cosmos DB does, so a new collection can't ship undeclared.
+    declared: frozenset[str] | None = None
+
     def __init__(self):
         self._data: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
 
+    def _check(self, collection: str) -> None:
+        if self.declared is not None and collection not in self.declared:
+            raise KeyError(f"no container {collection!r}: declare it in infra/azure/main.bicep")
+
     def get(self, collection: str, key: str) -> dict[str, Any] | None:
+        self._check(collection)
         doc = self._data[collection].get(key)
         return copy.deepcopy(doc) if doc is not None else None
 
     def put(self, collection: str, key: str, doc: dict[str, Any]) -> None:
+        self._check(collection)
         if any(c in key for c in ILLEGAL_ID_CHARS):
             raise ValueError(f"Id contains illegal chars: {key!r}")  # as Cosmos DB does
         self._data[collection][key] = copy.deepcopy(doc)
 
     def query(self, collection: str, **equals: Any) -> list[dict[str, Any]]:
+        self._check(collection)
         return [
             copy.deepcopy(d) for d in self._data[collection].values()
             if all(d.get(k) == v for k, v in equals.items())
