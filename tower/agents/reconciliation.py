@@ -179,9 +179,11 @@ class ReconciliationAgent:
         now = self.clock.now()
         reconciled, discrepancies, unreconciled = 0, [], []
         every_client = set(self.config.pilot_upcs).union(*self.config.tenant_upcs.values())
+        # One read of every position instead of one per SKU x node (most of which never held stock).
+        states = {(st["sku"], st["node_id"]): st for st in self.store.query(STATE)}
         for sku in sorted(every_client):
             for node_id in self.config.nodes:
-                st = self.store.get(STATE, state_key(sku, node_id))
+                st = states.get((sku, node_id))
                 phys = (st or {}).get("physical")
                 if not phys or now - datetime.fromisoformat(phys["counted_at"]) > timedelta(hours=24):
                     if st:  # only combinations that hold or held inventory need a count
@@ -196,17 +198,20 @@ class ReconciliationAgent:
         report = {"date": now.date().isoformat(), "reconciled": reconciled, "discrepancies": discrepancies,
                   "unreconciled": unreconciled}
         self.store.put(REPORTS, report["date"], report)
+        # One email a day: every discrepancy is in it (and audited one by one), so a bad count day can't
+        # flood the inbox or run into the email service's hourly limit.
         contact = self.directory.contact(FULFILLMENT_OPS) or FULFILLMENT_OPS
-        self.notifier.send(contact, f"Daily reconciliation {report['date']}", json.dumps(report, indent=2))
+        subject = f"Daily reconciliation {report['date']}" + (
+            f": {len(discrepancies)} discrepanc{'y' if len(discrepancies) == 1 else 'ies'}" if discrepancies
+            else ": no discrepancies")
+        self.notifier.send(contact, subject, json.dumps(report, indent=2),
+                           severity="high" if discrepancies else "info")
         self.audit.decision(AGENT, "daily_reconciliation", result={k: len(v) if isinstance(v, list) else v
                                                                     for k, v in report.items()},
                             owning_party=OwningParty.CORP_A)
         return report
 
     def _discrepancy_alert(self, d: dict[str, Any]) -> None:
-        contact = self.directory.contact(FULFILLMENT_OPS) or FULFILLMENT_OPS
-        self.notifier.send(contact, f"Inventory discrepancy {d['sku']} at {d['node_id']}", json.dumps(d),
-                           severity="high")
         self.audit.decision(AGENT, "discrepancy_alert", result=d, skus=[d["sku"]], node_ids=[d["node_id"]],
                             owning_party=OwningParty.CORP_A, tenant_id=self.config.tenant_of_sku(d["sku"]))
 
