@@ -30,3 +30,18 @@ def test_anthropic_key_wins_over_foundry():
 def test_foundry_without_key_and_none_without_either():
     assert type(_claude({"MCF_FOUNDRY_RESOURCE": "res"}, Secrets(), Cred())) is FoundryClaude
     assert _claude({}, Secrets(), Cred()) is None
+
+
+def test_a_throttled_email_never_waits_long():
+    pytest.importorskip("azure.core")
+    from azure.core.pipeline import PipelineResponse
+    from azure.core.rest import HttpRequest
+
+    from tower.adapters.azure import _short_retry
+
+    class Throttled:
+        status_code, headers = 429, {"Retry-After": "3600"}     # ACS's answer to its hourly email limit
+
+    policy = _short_retry()
+    assert policy.get_retry_after(PipelineResponse(HttpRequest("POST", "https://acs"), Throttled(), None)) == 10
+    assert policy.total_retries == 2
