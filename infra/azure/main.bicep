@@ -98,6 +98,8 @@ var containers = [
   { name: 'inventory_in_transit', ttl: -1 }
   { name: 'reconciliation_reports', ttl: -1 }
   { name: 'demand_plan', ttl: -1 }
+  { name: 'demand_actuals', ttl: -1 }
+  { name: 'demand_overrides', ttl: -1 }
   { name: 'sales_history', ttl: -1 }
   { name: 'cold_start', ttl: -1 }
   { name: 'planning_meta', ttl: -1 }

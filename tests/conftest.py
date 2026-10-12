@@ -1,3 +1,4 @@
+import re
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -6,13 +7,23 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tower.adapters.memory import StaticDirectory  # noqa: E402
+from tower.adapters.memory import InMemoryStore, StaticDirectory  # noqa: E402
 from tower.core import topics  # noqa: E402
 from tower.core.config import PilotConfig  # noqa: E402
 from tower.core.ports import Event  # noqa: E402
 from tower.runtime import build, memory_ports  # noqa: E402
 
 PILOT_UPCS = {"190000000001", "190000000002"}
+
+
+def declared_containers() -> frozenset[str]:
+    """The Cosmos DB containers the deployment creates (infra/azure/main.bicep)."""
+    bicep = (Path(__file__).resolve().parents[1] / "infra" / "azure" / "main.bicep").read_text()
+    block = bicep.split("var containers = [", 1)[1].split("\n]", 1)[0]
+    return frozenset(re.findall(r"name: '([a-z_]+)'", block))
+
+
+InMemoryStore.declared = declared_containers()
 
 
 @pytest.fixture
