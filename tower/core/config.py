@@ -123,6 +123,18 @@ class PilotConfig(BaseModel):
     default_unit_cost: float = 60.0
     feed_delivery_window: timedelta = timedelta(days=7, hours=12)
     replenishment_cooldown: timedelta = timedelta(hours=24)
+    # Who makes the planning judgment calls (which demand to plan with, restock size, moves, aged stock):
+    #   rules    the forecast and fixed rules, as before
+    #   sensing  rules, plus a fixed blend of recent orders into the plan when they drift from the forecast
+    #   claude   Claude reviews each drifting item and each proposal (rules when Claude is unavailable)
+    plan_review: str = Field(default="rules", pattern="^(rules|sensing|claude)$")
+    drift_window_days: int = 14                # recent orders compared with the plan over this many days
+    drift_ratio: float = 1.5                   # drifting when orders are 1.5x the plan or under 1/1.5 of it
+    drift_min_units: float = 10                # ...and either side has at least this many units in the window
+    demand_override_days: int = 7              # a demand call holds this long, then is looked at again
+    region_states: dict[str, list[str]] = Field(default_factory=lambda: {
+        "west": ["WA", "OR", "CA", "NV", "ID", "MT", "WY", "UT", "CO", "AZ", "NM", "AK", "HI"]})
+    default_region: str = "east"               # states not listed above
 
     # R2 reconciliation
     discrepancy_threshold_units: int = 2
@@ -173,6 +185,10 @@ class PilotConfig(BaseModel):
     def catalog(self, tenant_id: str | None) -> set[str]:
         tid = tenant_id or TENANT_ONE
         return self.pilot_upcs if tid == TENANT_ONE else self.tenant_upcs.get(tid, set())
+
+    def region_of_state(self, state: str | None) -> str:
+        st = (state or "").upper()
+        return next((r for r, states in self.region_states.items() if st in states), self.default_region)
 
     def tenant_of_sku(self, sku: str) -> str | None:
         """Whose item this is: each client owns its own stock (clients list different UPCs)."""

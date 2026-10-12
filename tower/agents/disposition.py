@@ -103,7 +103,7 @@ class DispositionAgent:
         for r in self.store.query(RECS, sku=ev["sku"], node_id=ev["node_id"]):
             if r["status"] in OPEN_STATES:
                 return
-            if r["status"] == "rejected" and now - datetime.fromisoformat(r["rejected_at"]) < \
+            if r["status"] in ("rejected", "kept") and now - datetime.fromisoformat(r["rejected_at"]) < \
                     self.config.disposition_rerecommend_after:
                 return
         qty = sum(q for q, _ in aged)
@@ -112,6 +112,22 @@ class DispositionAgent:
         options = {"return_to_rebound": round(qty * self.config.rebound_cost_per_unit, 2),
                    "removal": round(qty * self.config.removal_cost_per_unit, 2)}
         option = min(options, key=options.get)
+        review = self.planning.reviewer.disposition(self.planning.evidence(ev["sku"]) | {"proposal": {
+            "node_id": ev["node_id"], "aged_units": qty, "units_at_node": ev["qty"], "oldest_age_days": ev["oldest_age_days"],
+            "option": option, "cost": options[option], "daily_demand_planned": dd, "sell_through_days": sell_through}})
+        if review is not None:
+            self.audit.decision(AGENT, "disposition_reviewed", rationale=review.rationale,
+                                result={"decision": review.decision, "qty": review.qty}, skus=[ev["sku"]],
+                                node_ids=[ev["node_id"]], owning_party=OwningParty.CORP_B, tenant_id=ev["tenant_id"])
+            if review.decision == "keep" or review.qty == 0:
+                self.store.put(RECS, (rid := new_id("dsp")), {
+                    "rec_id": rid, "tenant_id": ev["tenant_id"], "sku": ev["sku"], "node_id": ev["node_id"], "qty": qty,
+                    "status": "kept", "rejected_at": now.isoformat(), "review": review.model_dump()})
+                return
+            if review.qty is not None:
+                qty = min(qty, review.qty)
+                options = {k: round(qty * c, 2) for k, c in (("return_to_rebound", self.config.rebound_cost_per_unit),
+                                                             ("removal", self.config.removal_cost_per_unit))}
         avoided = round(qty * self.config.storage_cost_per_unit_day * self.config.avoided_cost_horizon_days, 2)
         rec = {"rec_id": new_id("dsp"), "tenant_id": ev["tenant_id"], "sku": ev["sku"], "node_id": ev["node_id"], "qty": qty, "option": option,
                "estimated_disposition_cost": options[option], "alternatives": options,
@@ -121,6 +137,8 @@ class DispositionAgent:
         rationale = (f"{qty} units aged >= {self.config.disposition_threshold_days}d at {ev['node_id']}; "
                      f"demand outlook {'none' if dd is None else f'{dd:.2f}/day'}; {option} costs "
                      f"{options[option]} vs {avoided} storage avoided over {self.config.avoided_cost_horizon_days}d")
+        if review is not None:
+            rationale += f"; reviewed: {review.rationale}"
         item = self.approvals.submit(category=ApprovalCategory.DISPOSITION, owning_party=OwningParty.CORP_B,
                                      agent=AGENT, subject_id=rec["rec_id"], rationale=rationale, tenant_id=ev["tenant_id"],
                                      content={**{k: rec[k] for k in ("option", "qty", "estimated_disposition_cost",
