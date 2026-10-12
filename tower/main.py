@@ -35,6 +35,10 @@ def main(argv: list[str]) -> None:
         connectors.catch_up_catalogs()
     except Exception:  # noqa: BLE001 - the next catalog feed still loads normally
         logging.getLogger("tower.main").exception("could not catch up missing catalogs")
+    try:
+        connectors.catch_up_planning_feeds()
+    except Exception:  # noqa: BLE001 - the next weekly feed still loads normally
+        logging.getLogger("tower.main").exception("could not catch up planning feeds")
     logging.getLogger("tower.main").info("catalogs: %s", {t: len(system.config.catalog(t)) for t in system.config.tenants})
     keep_catalog_fresh(system)
     run()
