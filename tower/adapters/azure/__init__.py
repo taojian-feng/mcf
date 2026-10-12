@@ -313,14 +313,27 @@ class AppConfigDirectory:
 
 # ---------------------------------------------------------------- Communication Services (Notifier)
 
+def _short_retry(total: int = 2, max_wait_s: float = 10):
+    """A retry policy that never waits longer than max_wait_s. Azure's own honours any Retry-After, and Azure
+    Communication Services answers its hourly email limit with one of up to an hour."""
+    from azure.core.pipeline.policies import RetryPolicy
+
+    class ShortRetry(RetryPolicy):
+        def get_retry_after(self, response):
+            after = super().get_retry_after(response)
+            return min(after, max_wait_s) if after else after
+
+    return ShortRetry(retry_total=total, retry_backoff_max=max_wait_s)
+
+
 class AcsEmailNotifier:
     """Email through Azure Communication Services. A recipient with no address in mcf:contacts, or a
     failed send, is logged instead so a missing contact never breaks the agent that raised it."""
 
     def __init__(self, endpoint: str, sender: str, directory: AppConfigDirectory, credential=None):
         from azure.communication.email import EmailClient
-        # Few retries: a throttled send is logged and dropped rather than holding up the agent or job.
-        self._client = EmailClient(endpoint, credential or _credential(), retry_total=2, retry_backoff_max=10)
+        # Few, short retries: a throttled send is logged and dropped rather than holding up the agent or job.
+        self._client = EmailClient(endpoint, credential or _credential(), retry_policy=_short_retry())
         self._sender, self._directory, self._log = sender, directory, LogNotifier()
 
     def send(self, recipient: str, subject: str, body: str, *, severity: str = "info") -> None:
