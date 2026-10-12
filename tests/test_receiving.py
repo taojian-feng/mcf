@@ -10,7 +10,6 @@ from sim.common.freight import truck_outcome
 from tower.adapters.memory import ScriptedLLM, StaticDirectory
 from tower.core import topics
 from tower.core.config import PilotConfig
-from tower.core.ports import Event
 from tower.core.tenants import Tenant, default_tenants
 from tower.edge.gateway import Gateway, GatewayError
 from tower.runtime import build, memory_ports
