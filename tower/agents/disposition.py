@@ -1,4 +1,7 @@
-"""Disposition_Agent (R4): aging and storage-cost monitoring, disposition recommendations, tracking to completion."""
+"""Disposition_Agent (R4): aging and storage-cost monitoring, disposition recommendations, tracking to completion.
+
+Runs for every client's stock: each position belongs to the client that owns the item, and its alerts,
+recommendations, approvals and handoffs carry that client's tenant_id (alerts go to `<client>_inventory`)."""
 from __future__ import annotations
 
 import json
@@ -8,6 +11,7 @@ from typing import Any
 from tower.core import topics
 from tower.core.config import PilotConfig
 from tower.core.models import ApprovalCategory, OwningParty, UnhappyPathSignal, new_id
+from tower.core.tenants import TENANT_ONE
 from tower.core.ports import Clock, Directory, DocumentStore, Event, MessageBus, Notifier
 from tower.services.approval import ApprovalService
 from tower.services.audit import AuditService
@@ -17,7 +21,7 @@ from .planning import PlanningAgent
 from .reconciliation import STATE, ReconciliationAgent
 
 AGENT = "disposition_agent"
-INVENTORY_CONTACT = "corp_b_inventory"
+INVENTORY_CONTACT = "inventory"    # <client>_inventory
 ALERTS = "aging_alerts"
 RECS = "disposition_recs"
 OPEN_STATES = {"pending_approval", "approved", "initiated"}
@@ -42,14 +46,15 @@ class DispositionAgent:
         evaluations = []
         for st in self.store.query(STATE):
             sku, node = st["sku"], st["node_id"]
-            if sku not in self.config.pilot_upcs:
-                continue  # aging and disposition run for tenant one's stock so far
+            tenant_id = self.config.tenant_of_sku(sku)
+            if tenant_id is None:
+                continue  # no client lists this item (yet)
             lots = [(lot["qty"], (now - datetime.fromisoformat(lot["received_at"])).days) for lot in st["lots"]
                     if lot["qty"] > 0]
             if not lots:
                 self._reset_alerts(sku, node)
                 continue
-            ev = {"sku": sku, "node_id": node, "qty": sum(q for q, _ in lots), "oldest_age_days": max(a for _, a in lots),
+            ev = {"sku": sku, "node_id": node, "tenant_id": tenant_id, "qty": sum(q for q, _ in lots), "oldest_age_days": max(a for _, a in lots),
                   "storage_cost": round(sum(q * a for q, a in lots) * self.config.storage_cost_per_unit_day, 2)}
             evaluations.append(ev)
             for threshold in self.config.aging_thresholds_days:
@@ -58,7 +63,10 @@ class DispositionAgent:
             aged = [(q, a) for q, a in lots if a >= self.config.disposition_threshold_days]
             if aged:
                 self._maybe_recommend(ev, aged)
-        self.audit.decision(AGENT, "daily_aging_evaluation", result={"positions": len(evaluations)},
+        per_client: dict[str, int] = {}
+        for ev in evaluations:
+            per_client[ev["tenant_id"]] = per_client.get(ev["tenant_id"], 0) + 1
+        self.audit.decision(AGENT, "daily_aging_evaluation", result={"positions": len(evaluations), "by_client": per_client},
                             owning_party=OwningParty.CORP_B)
         return evaluations
 
@@ -75,11 +83,11 @@ class DispositionAgent:
         cost = round(sum(q * a for q, a in aged) * self.config.storage_cost_per_unit_day, 2)
         body = {"sku": ev["sku"], "node_id": ev["node_id"], "threshold_days": threshold, "quantity": qty,
                 "age_days": max(a for _, a in aged), "accumulated_storage_cost": cost}
-        self.notifier.send(self._contact(INVENTORY_CONTACT), f"Aging inventory: {ev['sku']} at {ev['node_id']}",
+        self.notifier.send(self._contact(ev["tenant_id"], INVENTORY_CONTACT), f"Aging inventory: {ev['sku']} at {ev['node_id']}",
                            json.dumps(body, indent=2))
         self.store.put(ALERTS, key, {"active": True, "sent_at": self.clock.now().isoformat(), **body})
         self.audit.decision(AGENT, "aging_alert_sent", result=body, skus=[ev["sku"]], node_ids=[ev["node_id"]],
-                            owning_party=OwningParty.CORP_B)
+                            owning_party=OwningParty.CORP_B, tenant_id=ev["tenant_id"])
 
     def _reset_alerts(self, sku: str, node: str) -> None:
         for threshold in self.config.aging_thresholds_days:
@@ -105,7 +113,7 @@ class DispositionAgent:
                    "removal": round(qty * self.config.removal_cost_per_unit, 2)}
         option = min(options, key=options.get)
         avoided = round(qty * self.config.storage_cost_per_unit_day * self.config.avoided_cost_horizon_days, 2)
-        rec = {"rec_id": new_id("dsp"), "sku": ev["sku"], "node_id": ev["node_id"], "qty": qty, "option": option,
+        rec = {"rec_id": new_id("dsp"), "tenant_id": ev["tenant_id"], "sku": ev["sku"], "node_id": ev["node_id"], "qty": qty, "option": option,
                "estimated_disposition_cost": options[option], "alternatives": options,
                "estimated_avoided_storage_cost": avoided,
                "demand_outlook": {"daily_demand": dd, "sell_through_days": sell_through},
@@ -114,14 +122,15 @@ class DispositionAgent:
                      f"demand outlook {'none' if dd is None else f'{dd:.2f}/day'}; {option} costs "
                      f"{options[option]} vs {avoided} storage avoided over {self.config.avoided_cost_horizon_days}d")
         item = self.approvals.submit(category=ApprovalCategory.DISPOSITION, owning_party=OwningParty.CORP_B,
-                                     agent=AGENT, subject_id=rec["rec_id"], rationale=rationale,
+                                     agent=AGENT, subject_id=rec["rec_id"], rationale=rationale, tenant_id=ev["tenant_id"],
                                      content={**{k: rec[k] for k in ("option", "qty", "estimated_disposition_cost",
                                                                      "estimated_avoided_storage_cost", "demand_outlook")},
                                               "skus": [ev["sku"]], "node_ids": [ev["node_id"]]})
         rec["approval_id"] = item.approval_id
         self.store.put(RECS, rec["rec_id"], rec)
         self.audit.decision(AGENT, "disposition_recommended", rationale=rationale, subject_id=rec["rec_id"],
-                            skus=[ev["sku"]], node_ids=[ev["node_id"]], owning_party=OwningParty.CORP_B)
+                            skus=[ev["sku"]], node_ids=[ev["node_id"]], owning_party=OwningParty.CORP_B,
+                            tenant_id=ev["tenant_id"])
 
     # ---------------------------------------------------------------- approval -> initiation (R4.6, R4.9)
 
@@ -138,13 +147,13 @@ class DispositionAgent:
             self.store.put(RECS, rec["rec_id"], rec)
             self.audit.decision(AGENT, "disposition_rejected_aging_resumed", subject_id=rec["rec_id"],
                                 rationale=event.payload.get("reason", ""), skus=[rec["sku"]], node_ids=[rec["node_id"]],
-                                owning_party=OwningParty.CORP_B)
+                                owning_party=OwningParty.CORP_B, tenant_id=_tenant(rec))
 
     def _initiate(self, rec: dict[str, Any]) -> None:
         h = self.handoffs.create("execute_disposition", requesting_party=OwningParty.CORP_B, requested_by=AGENT,
                                  blocked_steps=[f"{rec['rec_id']}:{rec['option']}"],
                                  context={"rec_id": rec["rec_id"], "sku": rec["sku"], "node_id": rec["node_id"],
-                                          "qty": rec["qty"], "option": rec["option"]})
+                                          "qty": rec["qty"], "option": rec["option"]}, tenant_id=_tenant(rec))
         rec.update(status="initiated", initiated_at=self.clock.now().isoformat(), handoff_id=h.handoff_id)
         self.store.put(RECS, rec["rec_id"], rec)
         self.bus.publish(Event(topics.TIMERS, "disposition_completion_check", {"rec_id": rec["rec_id"]},
@@ -152,7 +161,8 @@ class DispositionAgent:
                          deliver_at=self.clock.now() + self.config.disposition_completion_window)
         self.audit.decision(AGENT, "disposition_initiated", subject_id=rec["rec_id"],
                             result={"option": rec["option"], "handoff_id": h.handoff_id},
-                            skus=[rec["sku"]], node_ids=[rec["node_id"]], owning_party=OwningParty.CORP_B)
+                            skus=[rec["sku"]], node_ids=[rec["node_id"]], owning_party=OwningParty.CORP_B,
+                            tenant_id=_tenant(rec))
 
     # ---------------------------------------------------------------- tracking (R4.7, R4.8)
 
@@ -168,7 +178,7 @@ class DispositionAgent:
             self.handoffs.complete(rec["handoff_id"], by=event.payload.get("confirmed_by", "rebound"))
         self.audit.decision(AGENT, f"disposition_{event.type}", subject_id=rec["rec_id"],
                             result={"detail": event.payload.get("detail")}, skus=[rec["sku"]],
-                            node_ids=[rec["node_id"]], owning_party=OwningParty.CORP_B)
+                            node_ids=[rec["node_id"]], owning_party=OwningParty.CORP_B, tenant_id=_tenant(rec))
 
     def on_timer(self, event: Event) -> None:
         if event.type != "disposition_completion_check":
@@ -178,11 +188,18 @@ class DispositionAgent:
             return
         sig = UnhappyPathSignal(signal_type="disposition_overdue", source=AGENT, sku=rec["sku"], node_id=rec["node_id"],
                                 details={"rec_id": rec["rec_id"], "qty": rec["qty"], "option": rec["option"],
-                                         "initiated_at": rec["initiated_at"]}, received_at=self.clock.now())
+                                         "initiated_at": rec["initiated_at"]}, received_at=self.clock.now(),
+                                tenant_id=_tenant(rec))
         self.bus.publish(Event(topics.EXCEPTION_SIGNALS, sig.signal_type, sig.model_dump(mode="json"),
                                self.clock.now(), correlation_id=rec["rec_id"]))
         self.audit.decision(AGENT, "disposition_overdue_raised", subject_id=rec["rec_id"], skus=[rec["sku"]],
-                            node_ids=[rec["node_id"]], owning_party=OwningParty.CORP_B)
+                            node_ids=[rec["node_id"]], owning_party=OwningParty.CORP_B, tenant_id=_tenant(rec))
 
-    def _contact(self, name: str) -> str:
+    def _contact(self, tenant_id: str, role: str) -> str:
+        name = f"{tenant_id}_{role}"
         return self.directory.contact(name) or name
+
+
+def _tenant(rec: dict[str, Any]) -> str:
+    """Recommendations from before clients existed are tenant one's."""
+    return rec.get("tenant_id") or TENANT_ONE

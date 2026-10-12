@@ -143,18 +143,15 @@ class PartnerConnectors:
         records = self._records(path)
         feed_id = f"{kind}:{parts[-1].rsplit('.', 1)[0]}"
         planning = self.system.planning
+        tid = tenant.tenant_id
         if kind == "catalog":
-            self.apply_catalog(records, feed_id, tenant.tenant_id)
-        elif tenant.tenant_id != TENANT_ONE:
-            # Clients own separate stock now, but planning still runs for tenant one only (per-client planning is next).
-            log.warning("feed %s: %s feeds are planned for %s only so far", path, kind, TENANT_ONE)
-            return
+            self.apply_catalog(records, feed_id, tid)
         elif kind == "forecast":
-            planning.ingest_forecast(feed_id, records)
+            planning.ingest_forecast(feed_id, records, tid)
         elif kind == "sales":
-            planning.ingest_sales(feed_id, records)
+            planning.ingest_sales(feed_id, records, tid)
         elif kind == "cold_start":
-            planning.ingest_cold_start(feed_id, records)
+            planning.ingest_cold_start(feed_id, records, tid)
         else:
             log.warning("feed %s: unknown feed type %s", path, kind)
             return
@@ -232,6 +229,7 @@ def apply_catalog_doc(config, doc: dict[str, Any] | None, tenant_id: str = TENAN
     if tenant_id != TENANT_ONE:
         if upcs == config.tenant_upcs.get(tenant_id):
             return False
+        config.unit_cost = {**config.unit_cost, **(doc.get("unit_cost") or {})}   # clients list different UPCs
         config.tenant_upcs = {**config.tenant_upcs, tenant_id: upcs}
         return True
     if upcs != config.pilot_upcs:

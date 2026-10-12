@@ -6,6 +6,8 @@ whole cases of anything that has fallen below its reorder point, for delivery th
 Updates coming back tell the store what was allocated (store orders can be cut to protect web stock),
 what is on the truck (the advance ship notice) and when it arrived; arrived cases go onto the shelves.
 Web and store orders draw on the same Corp C stock at Corp A, which is the point of the exercise.
+Like Corp B it sends planning files: cold-start baselines at go-live, then a forecast and last week's
+actual demand on Corp A's network (web plus store orders) every Monday.
 """
 from __future__ import annotations
 
@@ -14,14 +16,14 @@ import logging
 import math
 import random
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from sim import catalog, geo
 from sim.common.returns import ReturnDesk
 from sim.common.store import SimStore
 from sim.common.web import Sender, post_json, urllib_sender
-from sim.corpb.engine import FIRST, HOURLY, LAST, STREETS, _HOURLY_MEAN, _poisson
+from sim.corpb.engine import FIRST, HOURLY, LAST, STREETS, _HOURLY_MEAN, _poisson, week_of
 
 log = logging.getLogger("sim.corpc")
 
@@ -81,6 +83,7 @@ class CorpC:
             return
         self._web_orders(now)
         self._store_day(now)
+        self._planning_feeds(now, live)
         self.flush()
         self.returns.flush(now)
 
@@ -272,6 +275,53 @@ class CorpC:
         self.store.put(st)
 
     # ---------------------------------------------------------------- files
+
+    # ---------------------------------------------------------------- planning files
+
+    def _planning_feeds(self, now: datetime, live: datetime) -> dict[str, Any]:
+        """Like Corp B: cold-start baselines at go-live, the first forecast an hour later, then every Monday
+        a forecast and last week's actual demand on Corp A's network (web orders plus store orders, in units)."""
+        meta = self.store.get("meta:feeds") or {"id": "meta:feeds", "doc_type": "meta"}
+        if not meta.get("initial"):
+            self._drop("cold_start", now, [
+                {"upc": it.upc, "region": r, "weekly_units": round(it.weekly_units[r] * self.rng.uniform(0.7, 1.3), 3)}
+                for it in self.items for r in catalog.REGIONS])
+            meta["initial"] = _iso(now)
+        monday = week_of(now.date()).isoformat()
+        if not meta.get("weekly") and now >= live + timedelta(hours=1):
+            self._drop("forecast", now, self._forecast(now.date()))
+            meta["weekly"] = monday
+        elif meta.get("weekly") and now.weekday() == 0 and now.hour >= 2 and meta["weekly"] != monday:
+            self._drop("forecast", now, self._forecast(now.date()))
+            self._drop("sales", now, self._sales(week_of(now.date()) - timedelta(days=7)))
+            meta["weekly"] = monday
+        self.store.put(meta)
+        return meta
+
+    def _forecast(self, today: date) -> list[dict[str, Any]]:
+        start = week_of(today)
+        return [{"upc": it.upc, "region": r, "week_start": (start + timedelta(weeks=w)).isoformat(),
+                 "units": round(it.weekly_units[r] * self.rng.uniform(0.85, 1.15), 3)}
+                for it in self.items for r in catalog.REGIONS for w in range(8)]
+
+    def _sales(self, week_start: date) -> list[dict[str, Any]]:
+        end = week_start + timedelta(days=7)
+        stores = {sid: state for sid, _n, _c, state, *_ in STORES}
+        units: dict[tuple[str, str], int] = {}
+        for o in self.store.query("order"):
+            if not week_start <= datetime.fromisoformat(o["placed_at"]).date() < end:
+                continue
+            if o.get("channel") == "store":
+                region = geo.region_of(stores.get(o.get("store_id"), "WA"))
+                lines = [(ln["upc"], ln["cases"] * ln["case_pack"]) for ln in o["payload"]["lines"]]
+            else:
+                region = geo.region_of(o["payload"]["consumer"]["address"]["state"])
+                lines = [(ln["upc"], ln["quantity"]) for ln in o["payload"]["lines"]]
+            for upc, qty in lines:
+                if upc in self.by_upc:
+                    units[(upc, region)] = units.get((upc, region), 0) + qty
+        return [{"upc": u, "region": r, "week_start": week_start.isoformat(), "units": float(n)}
+                for (u, r), n in sorted(units.items())]
 
     def _drop(self, kind: str, now: datetime, records: list[dict[str, Any]]) -> str:
         path = f"corpc/{kind}/{now:%Y-%m-%d}-{uuid.uuid4().hex[:6]}.json"
