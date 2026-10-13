@@ -104,12 +104,15 @@ class ApprovalService:
         the agent a minute later, after it has filed the request, the same way a person's decision would."""
         a = item.auto or {}
         item.status, item.decided_by, item.decided_at = ApprovalStatus.APPROVED, AUTONOMY, self.clock.now()
+        g = a["guardrails"]
         item.reason = (f"Approved automatically: people agreed with Claude on {a['agreement']:.0%} of the last "
-                       f"{a['decisions']} requests of this kind and Claude suggested approving this one.")
+                       f"{a['decisions']} requests of this kind, Claude suggested approving this one, and it is "
+                       f"within the guardrails (up to ${g['max_usd']:,.0f}, {g['daily_limit']} a day).")
         self._save(item)
         self.audit.decision(AUTONOMY, "auto_approved", rationale=item.reason, subject_id=item.approval_id,
                             result={"category": item.category.value, "lane": a["lane"], "agreement": a["agreement"],
-                                    "decisions": a["decisions"], "requested_by": item.originating_agent,
+                                    "decisions": a["decisions"], "guardrails": a["guardrails"],
+                                    "requested_by": item.originating_agent,
                                     "suggestion_reason": (item.brief or {}).get("suggestion_reason")},
                             owning_party=item.owning_party, tenant_id=item.tenant_id, **_ids(item.content))
         log.info("approval %s (%s) approved automatically", item.approval_id, a["lane"])

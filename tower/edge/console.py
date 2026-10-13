@@ -279,9 +279,9 @@ class Console:
         out = [f"<p><a href='/approvals?t={quote(token)}'>&larr; All approvals</a></p><h1>Automatic approvals</h1>",
                f"<p class=muted>A kind of request is approved without a person once people agreed with Claude's "
                f"suggestion on at least {cfg.autonomy_agreement:.0%} of their last {cfg.autonomy_min_decisions} "
-               f"decisions and never rejected one Claude suggested approving. Only requests Claude suggests "
-               f"approving and worth ${cfg.autonomy_max_usd:,.0f} or less; one in {cfg.autonomy_spot_check_every} "
-               "still comes to a person. Every one is in the audit log.</p>"]
+               f"decisions and never rejected one Claude suggested approving. Even then, only requests Claude "
+               "suggests approving and inside the guardrails you set below: a dollar limit, a daily limit, and "
+               "how often one still comes to a person as a spot check. Every one is in the audit log.</p>"]
         if notice:
             out.append(f"<p class=ok>{escape(notice)}</p>")
         lanes = self.lanes(user)
@@ -301,10 +301,30 @@ class Console:
             rows.append(f"<tr><td>{escape(ln['label'])}</td><td>{agree}</td>"
                         f"<td>{ln['rejected_when_claude_said_approve']}</td><td>{ln['auto_approved']}</td>"
                         f"<td>{state}</td><td>{button}</td></tr>")
+            if ln["eligible"]:
+                rows.append(f"<tr><td colspan=6>{_guardrails_form(ln, token)}</td></tr>")
         if rows:
             out.append("<table><tr><th>Kind</th><th>Agreed with Claude</th><th>Rejected when Claude said approve</th>"
                        "<th>Approved on its own</th><th>Now</th><th></th></tr>" + "".join(rows) + "</table>")
         return _page("Automatic approvals", "".join(out))
+
+    def set_guardrails(self, user: str, lane: str, form: dict[str, str]) -> str:
+        if lane not in {ln["lane"] for ln in self.lanes(user) if ln["eligible"]}:
+            raise PermissionError(f"{user} does not approve {lane}")
+        try:
+            limits = {"max_usd": float(form.get("max_usd", "")), "daily_limit": int(form.get("daily_limit", "")),
+                      "spot_check_every": int(form.get("spot_check_every", ""))}
+        except ValueError as e:
+            raise ApprovalError("enter a number in each box") from e
+        try:
+            change = self.approvals.autonomy.set_guardrails(user, lane, **limits)
+        except ValueError as e:
+            raise ApprovalError(str(e)) from e
+        self.approvals.audit.human(user, "autonomy_guardrails", subject_id=lane,
+                                   reason=form.get("reason", "").strip(), result=change)
+        a = change["after"]
+        return (f"Saved. Requests of this kind run on their own only up to ${a['max_usd']:,.0f} and "
+                f"{a['daily_limit']} a day, with one in {a['spot_check_every']} still sent to a person.")
 
     def switch_lane(self, user: str, lane: str, action: str, reason: str) -> str:
         if lane not in {ln["lane"] for ln in self.lanes(user)}:
@@ -456,8 +476,11 @@ def create_app(console: Console) -> Starlette:
         notice = ""
         if request.method == "POST":
             try:
-                notice = await run_in_threadpool(console.switch_lane, user, form.get("lane", ""),
-                                                 form.get("action", ""), form.get("reason", ""))
+                if form.get("action") == "guardrails":
+                    notice = await run_in_threadpool(console.set_guardrails, user, form.get("lane", ""), form)
+                else:
+                    notice = await run_in_threadpool(console.switch_lane, user, form.get("lane", ""),
+                                                     form.get("action", ""), form.get("reason", ""))
             except PermissionError:
                 return html(_page("Not allowed", "<h1>You don't approve that kind of request</h1>"), 403)
             except ApprovalError as e:
@@ -498,6 +521,20 @@ def _lane_form(lane: str, token: str, action: str, label: str) -> str:
             f"<input type=hidden name=t value='{escape(token, quote=True)}'>"
             f"<input type=hidden name=lane value='{escape(lane, quote=True)}'>"
             f"<input type=hidden name=action value={action}><button>{label}</button></form>")
+
+
+def _guardrails_form(ln: dict[str, Any], token: str) -> str:
+    g = ln["guardrails"]
+    who = f" Set by {escape(g['set_by'])}." if g.get("set_by") else " Defaults; nobody has changed them yet."
+    return (f"<form method=post action='/autonomy' class=inline>"
+            f"<input type=hidden name=t value='{escape(token, quote=True)}'>"
+            f"<input type=hidden name=lane value='{escape(ln['lane'], quote=True)}'>"
+            f"<input type=hidden name=action value=guardrails>"
+            f"Guardrails: up to $<input name=max_usd size=6 value='{g['max_usd']:.0f}'> each, "
+            f"at most <input name=daily_limit size=4 value='{g['daily_limit']}'> a day "
+            f"({ln.get('auto_today', 0)} so far today), one in "
+            f"<input name=spot_check_every size=3 value='{g['spot_check_every']}'> to a person "
+            f"<button>Save</button></form><span class=muted>{who}</span>")
 
 
 def _when(t: datetime | None) -> str:

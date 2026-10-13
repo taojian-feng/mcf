@@ -118,6 +118,9 @@ class PilotConfig(BaseModel):
     autonomy_agreement: float = 0.95       # and none of them a rejection of a suggested approval
     autonomy_max_usd: float = 500          # requests worth more always go to a person
     autonomy_spot_check_every: int = 10
+    # Guardrails a lane's approvers can change on the console (/autonomy), within these bounds.
+    autonomy_daily_limit: int = 50         # automatic approvals per lane per day; beyond that, to a person
+    autonomy_max_usd_ceiling: float = 5000  # the highest dollar limit an approver may set
     approval_briefs: bool = True     # a plain-language brief on every approval (Claude when configured)
     handoff_ack_window: timedelta = timedelta(hours=4)
     handoff_default_due: timedelta = timedelta(hours=24)

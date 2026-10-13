@@ -166,3 +166,52 @@ def test_the_console_says_who_approved_and_marks_spot_checks(s):
         ask(s)
     check = ask(s)
     assert "Spot check" in http.get(f"/approvals/{check.approval_id}?t={token}").text
+
+
+# ---------------------------------------------------------------- people's guardrails
+
+def test_approvers_set_the_guardrails_and_the_tower_keeps_inside_them(s):
+    history(s)
+    a = s.approvals.autonomy
+    a.set_guardrails("alice@corpb", "replenishment:corp_b", max_usd=100, daily_limit=2, spot_check_every=10)
+    assert ask(s, value=150).status == ApprovalStatus.PENDING              # above the dollar limit people set
+    first, second = ask(s, value=80), ask(s, value=80)
+    assert first.status == second.status == ApprovalStatus.APPROVED
+    assert "up to $100, 2 a day" in first.reason and first.auto["guardrails"]["daily_limit"] == 2
+    assert ask(s, value=80).status == ApprovalStatus.PENDING               # daily limit reached
+    s.ports.bus.advance(timedelta(days=1))
+    assert ask(s, value=80).status == ApprovalStatus.APPROVED              # a new day
+    (rec,) = audits(s, "auto_approved")[-1:]
+    assert rec.result["guardrails"] == {"max_usd": 100.0, "daily_limit": 2, "spot_check_every": 10}
+
+
+def test_guardrails_stay_within_bounds_and_survive_stop_and_start(s):
+    a = s.approvals.autonomy
+    with pytest.raises(ValueError):
+        a.set_guardrails("alice@corpb", "replenishment:corp_b", max_usd=10_000, daily_limit=5, spot_check_every=10)
+    with pytest.raises(ValueError):
+        a.set_guardrails("alice@corpb", "replenishment:corp_b", max_usd=100, daily_limit=5, spot_check_every=1)
+    a.set_guardrails("alice@corpb", "replenishment:corp_b", max_usd=100, daily_limit=5, spot_check_every=4)
+    a.stop("alice@corpb", "replenishment:corp_b", "peak")
+    a.start("replenishment:corp_b")
+    g = a.guardrails("replenishment:corp_b")
+    assert (g["max_usd"], g["daily_limit"], g["spot_check_every"], g["set_by"]) == (100, 5, 4, "alice@corpb")
+    assert a.guardrails("disposition:corp_b")["max_usd"] == s.config.autonomy_max_usd   # untouched lanes: defaults
+
+
+def test_an_approver_sets_guardrails_from_the_console(s):
+    history(s)
+    http = TestClient(create_app(Console(s.approvals, s.approvals.links)), follow_redirects=False)
+    token = _token(s)
+    assert "Guardrails: up to $" in http.get(f"/autonomy?t={token}").text
+    form = {"t": token, "lane": "replenishment:corp_b", "action": "guardrails", "max_usd": "50",
+            "daily_limit": "3", "spot_check_every": "5", "reason": "new client"}
+    r = http.post("/autonomy", data=form)
+    assert r.status_code == 200 and "up to $50 and 3 a day" in r.text and "Set by alice@corpb" in r.text
+    (rec,) = audits(s, "autonomy_guardrails")
+    assert rec.actor == "alice@corpb" and rec.result["after"]["max_usd"] == 50 and rec.rationale == "new client"
+    assert ask(s, value=120).status == ApprovalStatus.PENDING
+    assert "between $0 and" in http.post("/autonomy", data={**form, "max_usd": "99999"}).text
+    assert "enter a number" in http.post("/autonomy", data={**form, "daily_limit": "lots"}).text
+    r = http.post("/autonomy", data={**form, "lane": "invoice:corp_a"})
+    assert r.status_code == 403
