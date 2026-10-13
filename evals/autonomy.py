@@ -22,12 +22,12 @@ import argparse
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from evals.exceptions import Metered, Sample, collect
-from tower.agents.exception import Classifier
+from tower.agents.exception import Classifier, agent_finding
 from tower.core.config import PilotConfig
 from tower.core.models import ApprovalCategory, ApprovalStatus, ExceptionCategory, OwningParty
 from tower.core.ports import LLM
@@ -75,7 +75,7 @@ def agent_requests(samples: list[Sample], llm: LLM, threshold: float, workers: i
     cands = [s for s in samples if s.order_snapshot]
     with ThreadPoolExecutor(max_workers=workers) as pool:
         calls = list(pool.map(lambda s: classifier.classify(s.signal, s.order_snapshot), cands))
-    return _first_per_order([s for s, c in zip(cands, calls)
+    return _first_per_order([replace(s, finding=agent_finding(c)) for s, c in zip(cands, calls)
                              if c.category == ExceptionCategory.LOST_SHIPMENT and c.confidence >= threshold])
 
 
@@ -104,8 +104,10 @@ def replay(asks: list[Sample], llm: LLM | None, config: PilotConfig | None = Non
             category=ApprovalCategory.EXCEPTION_RESOLUTION, owning_party=OwningParty.CORP_B, agent="exception_agent",
             subject_id=f"case-{n}", tenant_id="corp_b",
             content={"order_id": s.signal.order_id, "playbook": "PB-LOST", "version": "1.0",
-                     "steps": ["request_reship", "notify_oms_reship"], "signal": s.signal.model_dump(mode="json")},
-            rationale=f"signal {s.signal.signal_type}: the parcel looks lost; reship it")
+                     "steps": ["request_reship", "notify_oms_reship"], "signal": s.signal.model_dump(mode="json"),
+                     **({"agent_finding": s.finding} if s.finding else {})},
+            rationale=(s.finding or {}).get("rationale")
+            or f"signal {s.signal.signal_type}: the parcel looks lost; reship it")
         said = (item.brief or {}).get("suggestion")
         if said in ("approve", "reject") and (item.brief or {}).get("source") == "claude":
             res.claude_clear += 1

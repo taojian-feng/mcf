@@ -165,6 +165,8 @@ def test_post_ship_cancellation_needs_approval_and_role(system):
     [case] = cases(system)
     assert case["playbook_id"] == "PB-CANCEL-POSTSHIP" and case["status"] == "awaiting_approval"
     assert system.handoffs.open_view() == []                                   # R8.2 pending blocks execution
+    finding = system.approvals.get(case["approval_id"]).content["agent_finding"]   # the brief weighs it
+    assert finding["category"] == case["classification"]["category"] and finding["rationale"] == case["classification"]["rationale"]
 
     with pytest.raises(PermissionError):
         system.approvals.decide("mallory@corpa-retail", case["approval_id"], approve=True)

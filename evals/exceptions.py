@@ -49,6 +49,7 @@ class Sample:
     signal: UnhappyPathSignal
     order_snapshot: dict[str, Any] | None
     truth: str | None = None  # an ExceptionCategory value, NONE, or None when unknown
+    finding: dict[str, Any] | None = None  # the exception agent's own finding, when it was asked (evals/autonomy)
 
 
 @dataclass
