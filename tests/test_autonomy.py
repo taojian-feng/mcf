@@ -215,3 +215,47 @@ def test_an_approver_sets_guardrails_from_the_console(s):
     assert "enter a number" in http.post("/autonomy", data={**form, "daily_limit": "lots"}).text
     r = http.post("/autonomy", data={**form, "lane": "invoice:corp_a"})
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------- trust through simulation
+
+LANE = "replenishment:corp_b"
+
+
+def test_an_accepted_replay_stands_in_for_the_live_record(s):
+    a = s.approvals.autonomy
+    a.record_replay(LANE, decisions=40, agreed=40, wrong_approvals=0, report="evals/x.md", model="m")
+    assert ask(s).status == ApprovalStatus.PENDING                         # passed, but nobody accepted it yet
+    a.accept_replay("alice@corpb", LANE)
+    item = ask(s)
+    assert item.status == ApprovalStatus.APPROVED and "40 of 40 replayed" in item.reason
+    assert audits(s, "auto_approved")[-1].result["basis"] == "replay"
+    decide(s, ask(s, value=900), approve=False)                            # over the limit, so a person: rejects it
+    assert ask(s).status == ApprovalStatus.PENDING
+
+
+def test_a_replay_that_failed_or_went_stale_cannot_start_a_lane(s):
+    a = s.approvals.autonomy
+    assert not a.record_replay(LANE, decisions=40, agreed=40, wrong_approvals=1)["passed"]
+    with pytest.raises(ValueError):
+        a.accept_replay("alice@corpb", LANE)
+    assert not a.record_replay(LANE, decisions=12, agreed=12, wrong_approvals=0)["passed"]   # too few
+    a.record_replay(LANE, decisions=40, agreed=40, wrong_approvals=0)
+    a.accept_replay("alice@corpb", LANE)
+    s.ports.bus.advance(timedelta(days=s.config.autonomy_replay_valid_days + 1))
+    assert ask(s).status == ApprovalStatus.PENDING
+    assert a.record(LANE)["replay"]["stale"]
+
+
+def test_an_approver_accepts_a_replay_from_the_console(s):
+    decide(s, ask(s, "reject"), approve=False)                             # a link for alice, and one live decision
+    s.approvals.autonomy.record_replay(LANE, decisions=40, agreed=39, wrong_approvals=0)
+    http = TestClient(create_app(Console(s.approvals, s.approvals.links)), follow_redirects=False)
+    token = _token(s)
+    page = http.get(f"/autonomy?t={token}").text
+    assert "Replay of 40 past requests" in page and "Accept the replay" in page
+    r = http.post("/autonomy", data={"t": token, "lane": LANE, "action": "accept_replay", "reason": "eval looks good"})
+    assert "Accepted." in r.text and "Approving on its own (from the replay)" in r.text
+    (rec,) = audits(s, "autonomy_replay_accepted")
+    assert rec.actor == "alice@corpb" and rec.result["agreed"] == 39
+    assert ask(s).status == ApprovalStatus.APPROVED

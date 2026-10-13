@@ -121,6 +121,9 @@ class PilotConfig(BaseModel):
     # Guardrails a lane's approvers can change on the console (/autonomy), within these bounds.
     autonomy_daily_limit: int = 50         # automatic approvals per lane per day; beyond that, to a person
     autonomy_max_usd_ceiling: float = 5000  # the highest dollar limit an approver may set
+    # Trust through simulation: a passed replay eval, once an approver accepts it, stands in for the live record
+    # until people have made autonomy_min_decisions decisions in the lane. It goes stale after this many days.
+    autonomy_replay_valid_days: int = 30
     approval_briefs: bool = True     # a plain-language brief on every approval (Claude when configured)
     handoff_ack_window: timedelta = timedelta(hours=4)
     handoff_default_due: timedelta = timedelta(hours=24)

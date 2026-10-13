@@ -183,3 +183,16 @@ def test_autonomy_eval_briefs_see_the_agents_finding():
     first, second = (p["request"] for p in judge.prompts)
     assert first["content"]["agent_finding"] == finding and first["rationale"] == "no scan for 9 days"
     assert "agent_finding" not in second["content"]
+
+
+def test_autonomy_eval_records_its_replay_for_the_live_lane():
+    from evals.autonomy import LANE, Result, record_replay
+    from tower.core.config import PilotConfig
+    from tower.runtime import memory_ports
+
+    ports = memory_ports()
+    cert = record_replay(ports, PilotConfig(), Result(requests=64, claude_clear=62, claude_agreed=62), report="r.md")
+    assert cert["passed"] and ports.store.get("autonomy_lanes", LANE)["replay"]["report"] == "r.md"
+    cert = record_replay(ports, PilotConfig(), Result(requests=64, claude_clear=62, claude_agreed=61,
+                                                      claude_wrong_approve=1))
+    assert not cert["passed"]

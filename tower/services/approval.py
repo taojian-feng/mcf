@@ -105,13 +105,19 @@ class ApprovalService:
         a = item.auto or {}
         item.status, item.decided_by, item.decided_at = ApprovalStatus.APPROVED, AUTONOMY, self.clock.now()
         g = a["guardrails"]
-        item.reason = (f"Approved automatically: people agreed with Claude on {a['agreement']:.0%} of the last "
-                       f"{a['decisions']} requests of this kind, Claude suggested approving this one, and it is "
+        if a.get("basis") == "replay":
+            r = self.autonomy.record(a["lane"])["replay"]
+            trust = (f"Claude's suggestions matched the right call on {r['agreed']} of {r['decisions']} replayed "
+                     f"requests of this kind (accepted by {r['accepted_by']})")
+        else:
+            trust = f"people agreed with Claude on {a['agreement']:.0%} of the last {a['decisions']} requests of this kind"
+        item.reason = (f"Approved automatically: {trust}, Claude suggested approving this one, and it is "
                        f"within the guardrails (up to ${g['max_usd']:,.0f}, {g['daily_limit']} a day).")
         self._save(item)
         self.audit.decision(AUTONOMY, "auto_approved", rationale=item.reason, subject_id=item.approval_id,
                             result={"category": item.category.value, "lane": a["lane"], "agreement": a["agreement"],
                                     "decisions": a["decisions"], "guardrails": a["guardrails"],
+                                    "basis": a.get("basis"),
                                     "requested_by": item.originating_agent,
                                     "suggestion_reason": (item.brief or {}).get("suggestion_reason")},
                             owning_party=item.owning_party, tenant_id=item.tenant_id, **_ids(item.content))

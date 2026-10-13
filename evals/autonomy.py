@@ -31,11 +31,12 @@ from tower.agents.exception import Classifier, agent_finding
 from tower.core.config import PilotConfig
 from tower.core.models import ApprovalCategory, ApprovalStatus, ExceptionCategory, OwningParty
 from tower.core.ports import LLM
-from tower.services.autonomy import AUTONOMY
+from tower.services.autonomy import AUTONOMY, Autonomy
 
 LOST = ExceptionCategory.LOST_SHIPMENT.value
 ASKS_FOR_RESHIP = ("carrier_lost", "projected_delivery_unavailable")
 PERSON = "alice@corpb"
+LANE = "exception_resolution:corp_b"     # the lane these reship requests belong to in the live tower
 PERSON_MINUTES = 4          # a person reading a brief and the order before deciding
 PRICE_IN, PRICE_OUT = 4.00, 20.00
 
@@ -46,6 +47,7 @@ class Result:
     really_lost: int = 0
     claude_agreed: int = 0          # Claude's suggestion matched the right decision (clear suggestions only)
     claude_clear: int = 0
+    claude_wrong_approve: int = 0   # Claude suggested approving a reship nobody needed
     auto: int = 0
     auto_wrong: int = 0
     spot_checks: int = 0
@@ -112,6 +114,7 @@ def replay(asks: list[Sample], llm: LLM | None, config: PilotConfig | None = Non
         if said in ("approve", "reject") and (item.brief or {}).get("source") == "claude":
             res.claude_clear += 1
             res.claude_agreed += (said == "approve") == right
+            res.claude_wrong_approve += said == "approve" and not right
         if item.decided_by == AUTONOMY:
             res.auto += 1
             res.first_auto = res.first_auto or n
@@ -160,6 +163,15 @@ def report(r: Result, *, days: float, model: str | None, config: PilotConfig, so
     return "\n".join(lines)
 
 
+def record_replay(ports: Any, config: PilotConfig, r: Result, *, report: str = "",
+                  model: str | None = None) -> dict[str, Any]:
+    """Trust through simulation: the live tower keeps what this replay found for Corp B's reship requests, so an
+    approver can let it stand in for the live record (services/autonomy.py)."""
+    return Autonomy(ports.store, ports.clock, config).record_replay(
+        LANE, decisions=r.claude_clear, agreed=r.claude_agreed, wrong_approvals=r.claude_wrong_approve,
+        report=report, model=model)
+
+
 def main(argv: list[str] | None = None) -> str:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=float, default=42)
@@ -181,12 +193,20 @@ def main(argv: list[str] | None = None) -> str:
     source = "raw" if args.raw or llm is None else "agent"
     asks = requests(samples) if source == "raw" else \
         agent_requests(samples, llm, config.classification_confidence_threshold)
-    text = report(replay(asks, llm, config), days=args.days, model=getattr(llm, "model", None), config=config,
-                  source=source)
-    print(text)
+    result = replay(asks, llm, config)
+    text = report(result, days=args.days, model=getattr(llm, "model", None), config=config, source=source)
     if ports is not None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        if source == "agent":
+            cert = record_replay(ports, config, result, report=f"evals/autonomy-{stamp}.md",
+                                 model=getattr(llm, "model", None))
+            text += (f"\n\nRecorded for Corp B's reship requests: {'passed' if cert['passed'] else 'did not pass'}"
+                     f" ({cert['agreed']} of {cert['decisions']} clear suggestions right, {cert['wrong_approvals']} "
+                     "suggested approving a reship nobody needed). An approver can accept a passed replay on the "
+                     "console's Automatic approvals page.")
         ports.blobs.write("reports", f"evals/autonomy-{stamp}.md", text.encode(), content_type="text/markdown")
+    print(text)
+    if ports is not None:
         ops = "ops-team"
         ports.notifier.send(ports.directory.contact(ops) or ops, "Earned autonomy evaluation", text)
     return text
