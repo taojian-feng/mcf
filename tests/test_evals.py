@@ -135,3 +135,23 @@ def test_autonomy_eval_replays_requests_through_earned_autonomy():
     r = replay(asks(40), Judge(wrong={25}))       # Claude says approve on a late parcel after autonomy started
     assert r.auto_wrong == 1 and r.wrong[0]["really"] == "delivery_delay"
     assert "Wrongly approved on its own" in report(r, days=1, model="m", config=PilotConfig())
+
+
+def test_autonomy_eval_asks_only_what_the_agent_would_ask():
+    from evals.autonomy import agent_requests
+    from evals.exceptions import Sample
+    from tower.core.models import UnhappyPathSignal
+
+    class Agent:
+        def structured(self, *, system, prompt, schema):
+            lost = "gone" in prompt
+            return schema.model_validate({"category": "lost_shipment" if lost else "delivery_delay",
+                                          "confidence": 0.9 if "sure" in prompt else 0.5,
+                                          "candidates": {}, "rationale": "record"})
+
+    def sample(i, state):
+        return Sample(UnhappyPathSignal(signal_type="carrier_lost", source="t", order_id=f"o{i}"), {"state": state},
+                      "lost_shipment")
+    asks = agent_requests([sample(1, "gone sure"), sample(2, "gone"), sample(3, "late sure"),
+                           sample(1, "gone sure")], Agent(), threshold=0.7)
+    assert [s.signal.order_id for s in asks] == ["o1"]          # sure and lost, once per order

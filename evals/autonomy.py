@@ -8,8 +8,10 @@ Claude writes the brief from the order's record, earned autonomy approves it on 
 qualifies (services/autonomy.py), and otherwise a simulated person decides it correctly (approve the reship
 only if the parcel really was lost). Spot checks go to that person too.
 
-The requests are deliberately harder than live ones: they come from the signal alone, so many are parcels
-that were only late. What matters is "approved on its own, wrongly": a reship nobody needed.
+With Claude the requests are the ones the exception agent really sends: it reads the order's record and asks
+for a reship only when it calls the parcel lost with enough confidence. `--raw` asks on every such signal
+instead, a much harder test where many parcels were only late. What matters is "approved on its own,
+wrongly": a reship nobody needed.
 
   python -m evals.autonomy --days 14            # rules briefs only: nothing is ever automatic
   python -m evals.autonomy --claude             # on Azure, 42 days, with Claude writing the briefs
@@ -19,11 +21,13 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from evals.exceptions import Metered, Sample, collect
+from tower.agents.exception import Classifier
 from tower.core.config import PilotConfig
 from tower.core.models import ApprovalCategory, ApprovalStatus, ExceptionCategory, OwningParty
 from tower.core.ports import LLM
@@ -60,8 +64,22 @@ class Result:
 
 
 def requests(samples: list[Sample]) -> list[Sample]:
-    """One request per order: its first signal that asks for a reship, in the order they arrived."""
-    asks = [s for s in samples if s.signal.signal_type in ASKS_FOR_RESHIP and s.order_snapshot]
+    """--raw: one request per order, its first signal that could ask for a reship, in the order they arrived."""
+    return _first_per_order([s for s in samples if s.signal.signal_type in ASKS_FOR_RESHIP and s.order_snapshot])
+
+
+def agent_requests(samples: list[Sample], llm: LLM, threshold: float, workers: int = 8) -> list[Sample]:
+    """What the exception agent really asks for: it reads the order's record, and a parcel it calls lost with
+    at least `threshold` confidence goes to approval for a reship (below it, a person handles the case)."""
+    classifier = Classifier(llm)
+    cands = [s for s in samples if s.order_snapshot]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        calls = list(pool.map(lambda s: classifier.classify(s.signal, s.order_snapshot), cands))
+    return _first_per_order([s for s, c in zip(cands, calls)
+                             if c.category == ExceptionCategory.LOST_SHIPMENT and c.confidence >= threshold])
+
+
+def _first_per_order(asks: list[Sample]) -> list[Sample]:
     asks = sorted(asks, key=lambda s: s.signal.received_at or datetime.min.replace(tzinfo=timezone.utc))
     seen: set[str] = set()
     return [s for s in asks if not (s.signal.order_id in seen or seen.add(s.signal.order_id))]
@@ -112,13 +130,15 @@ def replay(asks: list[Sample], llm: LLM | None, config: PilotConfig | None = Non
     return res
 
 
-def report(r: Result, *, days: float, model: str | None, config: PilotConfig) -> str:
+def report(r: Result, *, days: float, model: str | None, config: PilotConfig, source: str = "raw") -> str:
     pct = lambda a, b: f"{a / b:.0%}" if b else "n/a"  # noqa: E731
     saved = r.auto * PERSON_MINUTES
     lines = [
         "# Earned autonomy evaluation", "",
         f"Run {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC: {days:g} days, {r.requests} reship requests "
-        f"({r.really_lost} parcels really lost, {r.requests - r.really_lost} only late). "
+        f"({r.really_lost} parcels really lost, {r.requests - r.really_lost} not). Requests: "
+        + ("what the exception agent sends. " if source == "agent" else "every lost or no-delivery signal (--raw). ")
+        + 
         f"Briefs by {model or 'rules (no Claude)'}.", "",
         f"Rule: approve on its own after {config.autonomy_min_decisions} decisions with at least "
         f"{config.autonomy_agreement:.0%} agreement and no rejected approval suggestion; one in "
@@ -145,6 +165,7 @@ def main(argv: list[str] | None = None) -> str:
     ap.add_argument("--catalog-size", type=int, default=60)
     ap.add_argument("--seed", type=int, default=31)
     ap.add_argument("--claude", action="store_true", help="Claude writes the briefs (needs Azure)")
+    ap.add_argument("--raw", action="store_true", help="ask on every signal, not only what the agent would ask")
     args = ap.parse_args(argv)
     llm, ports = None, None
     if args.claude:
@@ -154,8 +175,12 @@ def main(argv: list[str] | None = None) -> str:
         if llm is None:
             raise SystemExit("--claude needs Claude: deploy it in Foundry or put anthropic-api-key in Key Vault")
     config = PilotConfig()
-    asks = requests(collect(args.days, args.orders_per_day, args.catalog_size, args.seed))
-    text = report(replay(asks, llm, config), days=args.days, model=getattr(llm, "model", None), config=config)
+    samples = collect(args.days, args.orders_per_day, args.catalog_size, args.seed)
+    source = "raw" if args.raw or llm is None else "agent"
+    asks = requests(samples) if source == "raw" else \
+        agent_requests(samples, llm, config.classification_confidence_threshold)
+    text = report(replay(asks, llm, config), days=args.days, model=getattr(llm, "model", None), config=config,
+                  source=source)
     print(text)
     if ports is not None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
