@@ -369,6 +369,7 @@ class ApprovalItem(BaseModel):
     reason: str | None = None
     reminders_sent: int = 0
     brief: dict[str, Any] | None = None   # plain-language note for the approver (services/briefs.py); advice only
+    auto: dict[str, Any] | None = None    # earned autonomy: the lane's record when approved automatically or spot-checked
 
 
 # ---------------------------------------------------------------- handoffs (R11)

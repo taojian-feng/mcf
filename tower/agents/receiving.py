@@ -279,7 +279,7 @@ class ReceivingAgent:
             category=ApprovalCategory.RECEIVING_CLAIM, owning_party=OwningParty.CORP_A, agent=AGENT,
             subject_id=claim["claim_id"], tenant_id=claim["tenant_id"],
             content={"store": claim["store_id"], "order": claim["client_order_id"],
-                     "credit": f"${claim['credit_usd']:,.2f}", "likely_cause": call["cause"],
+                     "credit": f"${claim['credit_usd']:,.2f}", "credit_usd": claim["credit_usd"], "likely_cause": call["cause"],
                      "confidence": round(call["confidence"], 2), "lines": claim["problems"],
                      "carrier_notes": [n["note"] for n in claim["evidence"]["carrier_delivery_notes"]
                                        if n.get("event") == "DELIVERED"],
