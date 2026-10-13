@@ -87,7 +87,7 @@ def test_claude_decides_the_demand_within_bounds_and_tells_the_client(directory)
     forecast(s)
     orders(s, per_day_west=4, days=15)
     [call] = s.planning.run_daily()["demand_calls"]
-    assert call["by"] == "claude" and call["rates"]["west"] == pytest.approx(3 * 4)   # capped at 3x what was seen
+    assert call["by"] == "claude" and call["rates"]["west"] == pytest.approx(1.5 * 4)  # capped at 1.5x what was seen
     assert "our_orders_daily" in llm.seen[0]["prompt"] and "drift" in llm.seen[0]["prompt"]
     assert [m for m in s.ports.notifier.to("planner@corpb") if m["subject"] == f"Forecast for {UPC} looks off"]
     assert s.planning.run_daily()["demand_calls"] == []        # the call holds for a week
@@ -119,9 +119,11 @@ def test_claude_can_hold_a_restock(directory):
     assert len(s.ports.store.query("replenishment_recs")) == 1  # not asked again inside the cool-down
 
 
-def test_claude_adjusts_a_restock_no_further_than_twice_and_what_the_source_holds(directory):
+def test_claude_can_shrink_a_restock_but_never_grow_it(directory):
     s, rec = _restock(directory, {"decision": "adjust", "qty": 500, "confidence": 0.7, "rationale": "surge"})
-    assert rec["qty"] == 40 and rec["status"] == "released"
+    assert rec["qty"] == 23 and rec["status"] == "released"                # what the rules asked for
+    s, rec = _restock(directory, {"decision": "adjust", "qty": 10, "confidence": 0.7, "rationale": "slowing"})
+    assert rec["qty"] == 10
 
 
 def test_claude_escalates_a_small_restock_to_a_person(directory):

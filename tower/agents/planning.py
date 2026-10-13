@@ -28,7 +28,7 @@ from tower.services.governance import GovernanceService
 from tower.services.handoffs import HandoffService
 from tower.services.integration import FeedResult, IntegrationLayer
 
-from .plan_review import SENSING_WEIGHT, PlanReviewer
+from .plan_review import DEMAND_CAP, RESTOCK_GROWTH, SENSING_WEIGHT, PlanReviewer
 from .reconciliation import ReconciliationAgent
 
 AGENT = "planning_agent"
@@ -304,7 +304,7 @@ class PlanningAgent:
                 if call is None:
                     continue  # the forecast stands
                 rates = {r.region: r.daily_units for r in call.rates if r.region in self.regions}
-                cap = {r: 3 * max(drift.get(r, {}).get("orders", 0) / n, self.planned_daily(upc, r) or 0, 1 / n)
+                cap = {r: DEMAND_CAP * max(drift.get(r, {}).get("orders", 0) / n, self.planned_daily(upc, r) or 0, 1 / n)
                        for r in self.regions}
                 rates = {r: round(min(v, cap[r]), 3) for r, v in rates.items()}
                 basis, why, by, tell = call.basis, call.rationale, "claude", call.tell_client
@@ -387,7 +387,7 @@ class PlanningAgent:
                 self.store.put(RECS, rec["rec_id"], rec)
                 return rec
             if review.decision == "adjust" and review.qty is not None:
-                qty = min(review.qty, 2 * rec["qty"], available)
+                qty = min(review.qty, int(RESTOCK_GROWTH * rec["qty"]), available)
                 if qty <= 0:
                     rec["status"] = "held"
                     self.store.put(RECS, rec["rec_id"], rec)
