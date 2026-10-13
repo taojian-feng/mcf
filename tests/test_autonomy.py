@@ -259,3 +259,28 @@ def test_an_approver_accepts_a_replay_from_the_console(s):
     (rec,) = audits(s, "autonomy_replay_accepted")
     assert rec.actor == "alice@corpb" and rec.result["agreed"] == 39
     assert ask(s).status == ApprovalStatus.APPROVED
+
+
+# ---------------------------------------------------------------- the coordination tax
+
+def test_the_weekly_review_measures_the_coordination_tax(s):
+    from tower.services.coordination import coordination
+    history(s)                                                             # 20 decided by a person, 5 minutes each
+    for _ in range(9):
+        ask(s)                                                             # 8 on their own, then a spot check
+    check = ask(s)
+    decide(s, check, approve=False)                                        # a spot check people rejected
+    waiting = ask(s, value=900)                                            # over the limit: still waiting
+    s.ports.store.put("orders", "o-1", {"order_id": "o-1", "tenant_id": "corp_b",
+                                         "placed_at": s.ports.clock.now().isoformat()})
+    s.ports.bus.advance(timedelta(hours=2))
+    today = s.ports.clock.now().date()
+    c = coordination(s.ports.store, "corp_b", today - timedelta(days=6), today, s.ports.clock.now())
+    assert (c["requests"], c["automatic"], c["by_person"], c["still_waiting"]) == (31, 9, 21, 1)
+    assert c["automatic_share"] == round(9 / 30, 3) and c["median_wait_hours"] == round(5 / 60, 1)
+    assert c["spot_checks_rejected"] == 1 and c["person_decisions_per_100_orders"] == 2100.0
+    assert c["next_to_automate"] == "replenishment" and c["hours_waiting"] >= 2
+    assert waiting.status == ApprovalStatus.PENDING
+    s.reporting.run_weekly(today)
+    body = s.ports.notifier.to("review@corpb")[-1]["body"]
+    assert "## Coordination tax" in body and "31 decisions: 9 made by the tower on its own (30%)" in body

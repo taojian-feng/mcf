@@ -21,6 +21,8 @@ from tower.core.models import TERMINAL_EXCEPTION_STATES, ExceptionStatus, Invent
 from tower.core.ports import LLM, BlobStore, Clock, Directory, DocumentStore, Event, MessageBus, Notifier
 from tower.core.tenants import TENANT_ONE
 from tower.services.audit import OPS_TEAM, AuditService
+from tower.services.coordination import coordination
+from tower.services.coordination import render as render_coordination
 from tower.services.governance import AccessDenied, GovernanceService
 
 from .planning import DEMAND_PLAN, RECS as REPLENISHMENT_RECS, SALES, PlanningAgent, week_of
@@ -290,6 +292,8 @@ class ReportingAgent:
             "pending_approvals": [{"approval_id": a["approval_id"], "category": a["category"],
                                    "created_at": a["created_at"]} for a in self.store.query("approvals", status="pending")
                                   if _of(a, tenant_id)],
+            "coordination": coordination(self.store, tenant_id, period_end - timedelta(days=6), period_end,
+                                         self.clock.now()),
         }
         summary["narrative"] = self._narrative(summary)
         self.store.put(SUMMARIES, summary_key("weekly", tenant_id, period_end.isoformat()), summary)
@@ -386,6 +390,8 @@ def render_markdown(s: dict[str, Any]) -> str:
                        ("Pending approvals", "pending_approvals")):
         lines += ["", f"## {title}", ""]
         lines += [f"- {json.dumps(x, default=str)}" for x in s[key]] or ["- none"]
+    if s.get("coordination"):
+        lines += ["", "## Coordination tax", ""] + render_coordination(s["coordination"])
     if s["narrative"]["highlights"]:
         lines += ["", "## Highlights", ""] + [f"- {h}" for h in s["narrative"]["highlights"]]
     return "\n".join(lines) + "\n"
