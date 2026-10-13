@@ -10,7 +10,7 @@ modes (`PilotConfig.plan_review`) decide who makes those calls:
            largest single line, stock and inbound by node) and decides the demand to plan with, and reviews
            each restock, rebalancing plan and aged-stock recommendation before it goes out
 
-Claude decides inside bounds the code enforces (a restock is at most twice the rules' size and never more
+Claude decides inside bounds the code enforces (a demand call is at most 1.5x what was ordered or planned; a restock can shrink but never grow, and never more
 than the source holds; a move never grows; a disposition never exceeds the aged units), every call is
 audited with its reasoning, and a failed or missing call leaves the rules' answer in place. Claude's calls
 are advice to the same approval gate as before: what needed a person's approval still does.
@@ -25,11 +25,17 @@ from pydantic import BaseModel, Field
 from tower.core.ports import LLM
 
 SENSING_WEIGHT = 0.7      # sensing mode: share of recent orders in the planned rate
+# Bounds on Claude's calls. The first evaluation in Azure (2026-10-12) had Claude ship the most orders but
+# carry the most excess stock, with demand calls up to 3x and restocks up to 2x the rules: now a demand call is
+# at most 1.5x what was ordered or planned, and a review can shrink or hold a restock but never grow it.
+DEMAND_CAP = 1.5
+RESTOCK_GROWTH = 1.0
 
 _ROLE = ("You are the demand and inventory planner in a logistics provider's control tower. The provider "
          "stores and ships retail clients' items from two regional fulfillment centres (FC-WEST, FC-EAST), "
          "refilled from bulk storage centres (ISC-X west, ISC-Y east). Stockouts lose sales; excess stock costs "
-         "storage and ends up disposed of; every transfer costs freight. Use only the evidence given. ")
+         "storage and ends up disposed of; every transfer costs freight. Excess is as real a cost as a "
+         "stockout: when the evidence is mixed, plan the lower of the plausible rates. Use only the evidence given. ")
 
 DEMAND_PROMPT = _ROLE + (
     "Recent orders for this item have drifted from the client's forecast. Decide the daily demand per region "
@@ -42,9 +48,10 @@ DEMAND_PROMPT = _ROLE + (
 RESTOCK_PROMPT = _ROLE + (
     "Review a proposed restock of a fulfillment centre from bulk storage before it goes out. The rules sized it "
     "to bring the centre to the target cover from the planned demand. Decide: approve (as proposed), adjust "
-    "(give the quantity), hold (do not move stock now) or escalate (a person must look). Hold when the "
-    "shortfall is not real (demand evidence says the plan is too high) or enough stock is already inbound; "
-    "adjust when the evidence says a different quantity is right; escalate only when the evidence conflicts.")
+    "(give a smaller quantity; a restock is never made larger), hold (do not move stock now) or escalate "
+    "(a person must look). Hold when the shortfall is not real (demand evidence says the plan is too high) or "
+    "enough stock is already inbound; adjust when the evidence says less is enough; escalate only when the "
+    "evidence conflicts.")
 
 PLAN_PROMPT = _ROLE + (
     "Review a proposed rebalancing plan: moves of stock between the regional centres, drafted because one "

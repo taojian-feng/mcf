@@ -69,9 +69,13 @@ def test_exceptions_reach_corp_a_as_cases(world):
     cases = world.ports.store.query("exception_cases")
     lost = [c for c in cases if c["signal"]["signal_type"] in ("carrier_lost", "projected_delivery_unavailable")]
     assert lost
+    # A lost parcel waits for Corp B's approval; once approved, Corp A is asked to reship it.
+    item = next(a for a in world.ports.store.query("approvals", status="pending")
+                if a["category"] == "exception_resolution")
+    world.system.approvals.decide("alice@corpb", item["approval_id"], approve=True)
+    world.run(hours=24)
     handoffs = world.ports.store.query("handoffs")
-    traced = [h for h in handoffs if h["action"] == "carrier_trace"]
-    assert traced and any(h["status"] == "completed" for h in traced)
+    assert any(h["status"] == "completed" for h in handoffs), [(h["action"], h["status"]) for h in handoffs]
     assert world.corpa.store.query("case")
 
 
