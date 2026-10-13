@@ -10,12 +10,19 @@ automatic approvals so far today. One in its spot-check rate still goes to a per
 fresh. The lane's approvers set the guardrails on the console (people set policy, not each decision);
 until they do, the config defaults apply.
 
+A lane can also start from simulation: the replay eval (evals/autonomy.py) records how Claude's suggestions
+did on replayed requests of that kind. If they pass the same bar (enough clear suggestions, agreement, none
+wrongly approved) and one of the lane's approvers accepts the result, the replay stands in for the live
+record until people have made enough live decisions. A live rejection of a request Claude suggested
+approving still takes autonomy away at once, and a replay goes stale after `autonomy_replay_valid_days`.
+
 Autonomy only ever approves: a suggested rejection or a closer look always goes to a person. A rejected spot
 check takes the lane's autonomy away until the record is clean again, and any approver for the lane can stop
 it (and start it again) from the console. Onboarding a client and sending an invoice never run on their own.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from tower.core.config import PilotConfig
@@ -76,10 +83,49 @@ class Autonomy:
                "auto_today": sum(str(d.get("decided_at") or "")[:10] == today for d in auto),
                "stopped_by": state.get("stopped_by"), "stopped_at": state.get("stopped_at"),
                "stop_reason": state.get("reason")}
-        rec["earned"] = (len(docs) >= self.config.autonomy_min_decisions and not wrong_approve
-                         and agreed / len(docs) >= self.config.autonomy_agreement)
+        live = (len(docs) >= self.config.autonomy_min_decisions and not wrong_approve
+                and agreed / len(docs) >= self.config.autonomy_agreement)
+        replay = self._replay(state)
+        rec["replay"] = replay
+        from_replay = (not live and len(docs) < self.config.autonomy_min_decisions and not wrong_approve
+                       and bool(replay) and replay["usable"] and bool(replay.get("accepted_by"))
+                       and (not docs or agreed / len(docs) >= self.config.autonomy_agreement))
+        rec["earned"] = live or from_replay
+        rec["basis"] = "live" if live else "replay" if from_replay else None
         rec["on"] = rec["earned"] and not rec["stopped_by"] and self.eligible(category)
         return rec
+
+    def _replay(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        r = state.get("replay")
+        if not r:
+            return None
+        age = self.clock.now() - datetime.fromisoformat(r["run_at"])
+        stale = age > timedelta(days=self.config.autonomy_replay_valid_days)
+        return {**r, "stale": stale, "usable": r["passed"] and not stale}
+
+    # ---------------------------------------------------------------- trust through simulation
+
+    def record_replay(self, lane: str, *, decisions: int, agreed: int, wrong_approvals: int, report: str = "",
+                      model: str | None = None) -> dict[str, Any]:
+        """What the replay eval found for this lane; whether it passed the same bar as the live record."""
+        cfg = self.config
+        passed = (decisions >= cfg.autonomy_min_decisions and not wrong_approvals
+                  and agreed / decisions >= cfg.autonomy_agreement)
+        replay = {"run_at": self.clock.now().isoformat(), "decisions": decisions, "agreed": agreed,
+                  "wrong_approvals": wrong_approvals, "passed": passed, "report": report, "model": model,
+                  "accepted_by": None, "accepted_at": None}
+        self._update(lane, replay=replay)
+        return replay
+
+    def accept_replay(self, user: str, lane: str) -> dict[str, Any]:
+        """An approver lets a passed, fresh replay stand in for the live record (ValueError otherwise)."""
+        state = self.store.get(LANES, lane) or {}
+        replay = self._replay(state)
+        if not replay or not replay["usable"]:
+            raise ValueError("there is no fresh, passed replay for this kind of request")
+        accepted = {**state["replay"], "accepted_by": user, "accepted_at": self.clock.now().isoformat()}
+        self._update(lane, replay=accepted)
+        return accepted
 
     def eligible(self, category: str) -> bool:
         return self.config.autonomy and category in self.config.autonomy_categories \
@@ -99,6 +145,7 @@ class Autonomy:
         if not rec["on"] or (value is not None and value > g["max_usd"]) or rec["auto_today"] >= g["daily_limit"]:
             return None
         info = {"lane": rec["lane"], "decisions": rec["decisions"], "agreement": rec["agreement"],
+                "basis": rec["basis"],
                 "guardrails": {k: g[k] for k in GUARDRAILS}}
         if (rec["auto_approved"] + rec["spot_checks"] + 1) % g["spot_check_every"] == 0:
             return {**info, "spot_check": True}

@@ -295,14 +295,15 @@ class Console:
                 state = f"Stopped by {escape(ln['stopped_by'])}"
                 button = _lane_form(ln["lane"], token, "start", "Start again")
             else:
-                state = "Approving on its own" if ln["on"] else "Earning"
+                state = ("Approving on its own" + (" (from the replay)" if ln["basis"] == "replay" else "")
+                         if ln["on"] else "Earning")
                 button = _lane_form(ln["lane"], token, "stop", "Stop")
             agree = f"{ln['agreed']} of {ln['decisions']}" if ln["decisions"] else "none yet"
             rows.append(f"<tr><td>{escape(ln['label'])}</td><td>{agree}</td>"
                         f"<td>{ln['rejected_when_claude_said_approve']}</td><td>{ln['auto_approved']}</td>"
                         f"<td>{state}</td><td>{button}</td></tr>")
             if ln["eligible"]:
-                rows.append(f"<tr><td colspan=6>{_guardrails_form(ln, token)}</td></tr>")
+                rows.append(f"<tr><td colspan=6>{_guardrails_form(ln, token)}{_replay_line(ln, token)}</td></tr>")
         if rows:
             out.append("<table><tr><th>Kind</th><th>Agreed with Claude</th><th>Rejected when Claude said approve</th>"
                        "<th>Approved on its own</th><th>Now</th><th></th></tr>" + "".join(rows) + "</table>")
@@ -335,8 +336,19 @@ class Console:
         elif action == "start":
             self.approvals.autonomy.start(lane)
             msg = "Started again. It approves on its own only while the record still qualifies."
+        elif action == "accept_replay":
+            try:
+                r = self.approvals.autonomy.accept_replay(user, lane)
+            except ValueError as e:
+                raise ApprovalError(str(e)) from e
+            self.approvals.audit.human(user, "autonomy_replay_accepted", subject_id=lane, reason=reason.strip(),
+                                       result={k: r[k] for k in ("run_at", "decisions", "agreed", "wrong_approvals",
+                                                                 "model", "report")})
+            return ("Accepted. Until people have decided enough requests of this kind themselves, the replay stands "
+                    "in for their record, inside your guardrails; one live rejection of a request Claude suggested "
+                    "approving takes it away.")
         else:
-            raise ApprovalError("choose stop or start")
+            raise ApprovalError("choose stop, start or accept the replay")
         self.approvals.audit.human(user, f"autonomy_{action}", subject_id=lane, reason=reason.strip())
         return msg
 
@@ -535,6 +547,22 @@ def _guardrails_form(ln: dict[str, Any], token: str) -> str:
             f"({ln.get('auto_today', 0)} so far today), one in "
             f"<input name=spot_check_every size=3 value='{g['spot_check_every']}'> to a person "
             f"<button>Save</button></form><span class=muted>{who}</span>")
+
+
+def _replay_line(ln: dict[str, Any], token: str) -> str:
+    r = ln.get("replay")
+    if not r:
+        return ""
+    when = str(r["run_at"])[:10]
+    found = (f"<br>Replay of {r['decisions']} past requests on {when}: Claude was right on {r['agreed']}, and "
+             f"suggested approving {r['wrong_approvals']} it should not have. ")
+    if r["stale"]:
+        return found + "<span class=muted>Too old to use; run the eval again.</span>"
+    if not r["passed"]:
+        return found + "<span class=muted>It did not pass the bar, so it can't stand in for people's record.</span>"
+    if r.get("accepted_by"):
+        return found + f"<span class=muted>Accepted by {escape(r['accepted_by'])}.</span>"
+    return found + _lane_form(ln["lane"], token, "accept_replay", "Accept the replay")
 
 
 def _when(t: datetime | None) -> str:
