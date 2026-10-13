@@ -109,6 +109,15 @@ class PilotConfig(BaseModel):
             "recount_receipt": OwningParty.CORP_B,       # the client's store counts again
         }
     )
+    # Earned autonomy (services/autonomy.py): a kind of approval people keep agreeing with Claude on is
+    # approved automatically, audited, with one in `autonomy_spot_check_every` still sent to a person.
+    autonomy: bool = True
+    autonomy_categories: set[str] = Field(default_factory=lambda: {
+        "exception_resolution", "replenishment", "distribution_plan", "disposition", "receiving_claim"})
+    autonomy_min_decisions: int = 20       # people's decisions on Claude's clear suggestions, the latest that count
+    autonomy_agreement: float = 0.95       # and none of them a rejection of a suggested approval
+    autonomy_max_usd: float = 500          # requests worth more always go to a person
+    autonomy_spot_check_every: int = 10
     approval_briefs: bool = True     # a plain-language brief on every approval (Claude when configured)
     handoff_ack_window: timedelta = timedelta(hours=4)
     handoff_default_due: timedelta = timedelta(hours=24)

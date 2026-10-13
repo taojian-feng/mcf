@@ -102,3 +102,36 @@ def test_receiving_evaluation_scores_rules_and_claude_on_the_same_cases():
     assert claude.shorted_store_recounts == really_short and claude.credits_given_away == 0
     text = ev.report([rules, claude], cases, days=12, model=None, threshold=config.receiving_confidence)
     assert "| rules |" in text and "| claude |" in text
+
+
+def test_autonomy_eval_replays_requests_through_earned_autonomy():
+    from evals.autonomy import replay, report
+    from evals.exceptions import Sample
+    from tower.core.config import PilotConfig
+    from tower.core.models import UnhappyPathSignal
+
+    class Judge:
+        """Suggests what the order record shows, except where told to get it wrong."""
+        def __init__(self, wrong=()):
+            self.wrong, self.n = set(wrong), 0
+
+        def structured(self, *, system, prompt, schema):
+            self.n += 1
+            lost = '"state": "lost"' in prompt
+            right = "approve" if lost else "reject"
+            flip = {"approve": "reject", "reject": "approve"}
+            return schema.model_validate({
+                "summary": "s", "if_approved": "a", "if_rejected": "r", "key_numbers": [], "check_first": [],
+                "suggestion": flip[right] if self.n in self.wrong else right, "suggestion_reason": "the record"})
+
+    def asks(n):
+        return [Sample(UnhappyPathSignal(signal_type="carrier_lost", source="t", order_id=f"o{i}"),
+                       {"state": "lost" if i % 3 else "late"}, "lost_shipment" if i % 3 else "delivery_delay")
+                for i in range(n)]
+
+    r = replay(asks(40), Judge())
+    assert r.first_auto == 21 and r.auto + r.spot_checks == 13 and r.spot_checks == 1 and r.auto_wrong == 0
+    assert r.auto + r.to_person == 40 and r.claude_agreed == r.claude_clear == 40
+    r = replay(asks(40), Judge(wrong={25}))       # Claude says approve on a late parcel after autonomy started
+    assert r.auto_wrong == 1 and r.wrong[0]["really"] == "delivery_delay"
+    assert "Wrongly approved on its own" in report(r, days=1, model="m", config=PilotConfig())

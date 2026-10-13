@@ -38,6 +38,7 @@ from pydantic import ValidationError
 from tower.core.models import ApprovalItem, ApprovalStatus
 from tower.services.approval import ApprovalError, ApprovalService, owner_label
 from tower.services.approval_links import ApprovalLinks
+from tower.services.autonomy import AUTONOMY, lane_of
 from tower.services.client_keys import api_key, webhook_key
 from tower.services.clients import ClientApplication, ClientRecord
 
@@ -75,6 +76,7 @@ class Console:
         decided = [i for i in items if i.status != ApprovalStatus.PENDING][:20]
         body = [f"<h1>Approvals</h1><p class=muted>Signed in as {escape(user)}"
                 + (f" · <a href='/ask?t={quote(token)}'>Ask the tower</a>" if self.copilot else "")
+                + f" · <a href='/autonomy?t={quote(token)}'>Automatic approvals</a>"
                 + (f" · <a href='/clients?t={quote(token)}'>Clients</a>" if self.can_onboard(user) else "") + "</p>"]
         body.append(f"<h2>Waiting for you ({len(pending)})</h2>")
         body.append(_rows(pending, token) if pending else "<p class=muted>Nothing is waiting. You're all caught up.</p>")
@@ -90,6 +92,11 @@ class Console:
             out.append(f"<p class=ok>{escape(notice)}</p>")
         if error:
             out.append(f"<p class=err>{escape(error)}</p>")
+        if item.auto and item.auto.get("spot_check") and item.status == ApprovalStatus.PENDING:
+            out.append("<p class=muted>Spot check: requests like this are now approved automatically because "
+                       f"people agreed with Claude on {item.auto['agreement']:.0%} of the last "
+                       f"{item.auto['decisions']}. One in {self.approvals.config.autonomy_spot_check_every} still "
+                       "comes to a person. Rejecting it sends this kind back to people.</p>")
         if item.brief:
             out.append(_brief(item.brief))
         out.append("<dl>")
@@ -108,7 +115,8 @@ class Console:
                 out.append("<p class=muted>You can view this request, but deciding it needs another approver.</p>")
         else:
             reason = f": {escape(item.reason)}" if item.reason else ""
-            out.append(f"<p>{item.status.value.capitalize()} by {escape(item.decided_by or '')} "
+            by = "the tower on its own" if item.decided_by == AUTONOMY else (item.decided_by or "")
+            out.append(f"<p>{item.status.value.capitalize()} by {escape(by)} "
                        f"on {_when(item.decided_at)}{reason}</p>")
         return _page(_title(item), "".join(out))
 
@@ -257,6 +265,61 @@ class Console:
                 "first order": _when(rec.first_order_at) or "not yet"}))
         return _page(rec.name, "".join(out))
 
+    # ---------------------------------------------------------------- earned autonomy
+
+    def lanes(self, user: str) -> list[dict[str, Any]]:
+        """Each kind of request this user approves, with its record and whether it runs on its own."""
+        found = {lane_of(i): i for i in self.approvals.visible_to(user)}
+        return [{**self.approvals.autonomy.record(lane), "label": _kind_label(item),
+                 "eligible": self.approvals.autonomy.eligible(item.category.value)}
+                for lane, item in sorted(found.items())]
+
+    def autonomy_page(self, user: str, token: str, notice: str = "") -> str:
+        cfg = self.approvals.config
+        out = [f"<p><a href='/approvals?t={quote(token)}'>&larr; All approvals</a></p><h1>Automatic approvals</h1>",
+               f"<p class=muted>A kind of request is approved without a person once people agreed with Claude's "
+               f"suggestion on at least {cfg.autonomy_agreement:.0%} of their last {cfg.autonomy_min_decisions} "
+               f"decisions and never rejected one Claude suggested approving. Only requests Claude suggests "
+               f"approving and worth ${cfg.autonomy_max_usd:,.0f} or less; one in {cfg.autonomy_spot_check_every} "
+               "still comes to a person. Every one is in the audit log.</p>"]
+        if notice:
+            out.append(f"<p class=ok>{escape(notice)}</p>")
+        lanes = self.lanes(user)
+        if not lanes:
+            out.append("<p class=muted>You don't approve any requests yet.</p>")
+        rows = []
+        for ln in lanes:
+            if not ln["eligible"]:
+                state, button = "Always a person", ""
+            elif ln["stopped_by"]:
+                state = f"Stopped by {escape(ln['stopped_by'])}"
+                button = _lane_form(ln["lane"], token, "start", "Start again")
+            else:
+                state = "Approving on its own" if ln["on"] else "Earning"
+                button = _lane_form(ln["lane"], token, "stop", "Stop")
+            agree = f"{ln['agreed']} of {ln['decisions']}" if ln["decisions"] else "none yet"
+            rows.append(f"<tr><td>{escape(ln['label'])}</td><td>{agree}</td>"
+                        f"<td>{ln['rejected_when_claude_said_approve']}</td><td>{ln['auto_approved']}</td>"
+                        f"<td>{state}</td><td>{button}</td></tr>")
+        if rows:
+            out.append("<table><tr><th>Kind</th><th>Agreed with Claude</th><th>Rejected when Claude said approve</th>"
+                       "<th>Approved on its own</th><th>Now</th><th></th></tr>" + "".join(rows) + "</table>")
+        return _page("Automatic approvals", "".join(out))
+
+    def switch_lane(self, user: str, lane: str, action: str, reason: str) -> str:
+        if lane not in {ln["lane"] for ln in self.lanes(user)}:
+            raise PermissionError(f"{user} does not approve {lane}")
+        if action == "stop":
+            self.approvals.autonomy.stop(user, lane, reason.strip() or "stopped from the console")
+            msg = "Stopped. Every request of this kind goes to a person until someone starts it again."
+        elif action == "start":
+            self.approvals.autonomy.start(lane)
+            msg = "Started again. It approves on its own only while the record still qualifies."
+        else:
+            raise ApprovalError("choose stop or start")
+        self.approvals.audit.human(user, f"autonomy_{action}", subject_id=lane, reason=reason.strip())
+        return msg
+
     def decide(self, user: str, approval_id: str, decision: str, reason: str) -> str:
         if decision not in ("approve", "reject"):
             raise ApprovalError("choose approve or reject")
@@ -381,6 +444,26 @@ def create_app(console: Console) -> Starlette:
         notice = "Checked and sent for approval." if request.query_params.get("done") else ""
         return html(await run_in_threadpool(console.client_page, token, rec, notice))
 
+    async def autonomy(request: Request) -> Response:
+        if request.method == "POST":
+            form = {k: v[0] for k, v in parse_qs((await request.body()).decode(errors="replace")).items()}
+            token = form.get("t", "")
+        else:
+            form, token = {}, request.query_params.get("t", "")
+        user = console.user(token)
+        if not user:
+            return signed_out()
+        notice = ""
+        if request.method == "POST":
+            try:
+                notice = await run_in_threadpool(console.switch_lane, user, form.get("lane", ""),
+                                                 form.get("action", ""), form.get("reason", ""))
+            except PermissionError:
+                return html(_page("Not allowed", "<h1>You don't approve that kind of request</h1>"), 403)
+            except ApprovalError as e:
+                notice = str(e)
+        return html(await run_in_threadpool(console.autonomy_page, user, token, notice))
+
     async def home(request: Request) -> Response:
         return html(_page("Approvals", "<h1>Control Tower approvals</h1>"
                           "<p>Open the link in your approval email to see what's waiting for you.</p>"))
@@ -393,6 +476,7 @@ def create_app(console: Console) -> Starlette:
         Route("/approvals/{approval_id}", detail, methods=["GET"]),
         Route("/approvals/{approval_id}", decide, methods=["POST"]),
         Route("/ask", ask, methods=["GET", "POST"]),
+        Route("/autonomy", autonomy, methods=["GET", "POST"]),
         Route("/clients", clients, methods=["GET", "POST"]),
         Route("/clients/new", new_client, methods=["GET"]),
         Route("/clients/{tenant_id}", client, methods=["GET"]),
@@ -403,6 +487,17 @@ def create_app(console: Console) -> Starlette:
 
 def _title(item: ApprovalItem) -> str:
     return f"{item.category.value.replace('_', ' ').capitalize()} for {item.subject_id}"
+
+
+def _kind_label(item: ApprovalItem) -> str:
+    return f"{item.category.value.replace('_', ' ').capitalize()} for {owner_label(item)}"
+
+
+def _lane_form(lane: str, token: str, action: str, label: str) -> str:
+    return (f"<form method=post action='/autonomy' class=inline>"
+            f"<input type=hidden name=t value='{escape(token, quote=True)}'>"
+            f"<input type=hidden name=lane value='{escape(lane, quote=True)}'>"
+            f"<input type=hidden name=action value={action}><button>{label}</button></form>")
 
 
 def _when(t: datetime | None) -> str:

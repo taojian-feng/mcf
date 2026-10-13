@@ -119,6 +119,7 @@ var containers = [
   { name: 'invoices', ttl: -1 }
   { name: 'store_receipts', ttl: -1 }
   { name: 'receiving_claims', ttl: -1 }
+  { name: 'autonomy_lanes', ttl: -1 }
 ]
 
 // ------------------------------------------------------------------ identity + observability
@@ -643,6 +644,34 @@ resource evalReceivingJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
         name: 'eval'
         image: image
         command: [ 'python', '-m', 'evals.receiving', '--arms', 'all' ]
+        resources: { cpu: json('1.0'), memory: '2Gi' }
+        env: commonEnv
+      } ]
+    }
+  }
+  dependsOn: [ roleAcr ]
+}
+
+// Earned autonomy evaluation: replays reship requests through the approval workflow with Claude's briefs and counts
+// what would have been approved on its own, and wrongly. Started by hand: az containerapp job start -g <rg> -n <prefix>-eval-autonomy.
+resource evalAutonomyJob 'Microsoft.App/jobs@2024-03-01' = if (enableClaude) {
+  name: '${prefix}-eval-autonomy'
+  location: location
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${uami.id}': {} } }
+  properties: {
+    environmentId: cae.id
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 5400
+      replicaRetryLimit: 0
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: registries
+    }
+    template: {
+      containers: [ {
+        name: 'eval'
+        image: image
+        command: [ 'python', '-m', 'evals.autonomy', '--claude' ]
         resources: { cpu: json('1.0'), memory: '2Gi' }
         env: commonEnv
       } ]
