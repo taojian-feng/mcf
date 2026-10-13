@@ -25,7 +25,7 @@ See [docs/DEPLOY_AZURE.md](docs/DEPLOY_AZURE.md): a one-time Cloud Shell setup s
 | Client onboarding and billing | done: onboarding agent (checks against the network, Corp A approval, derived keys, welcome, go-live tracking), catalog upload API, Corp A's rate card, daily charges, monthly invoices approved by Corp A | roadmap step 8 |
 | Planning for every client | done: demand plans, restock, rebalancing, aged-stock decisions, daily metrics and weekly/quarterly reviews per client, each inside its own data fence; Corp C sends forecasts and sales | after step 8 |
 | Planning judgment | built, off by default: recent orders vs plan per item; demand calls and reviews of restocks, rebalancing and aged stock by rules, a fixed blend, or Claude (`plan_review`); planning evaluation | after step 8 |
-| Store receiving problems | built, off by default: stores report what arrived; short or damaged deliveries are traced to the warehouse, the carrier or the store's count, by rules or Claude (`receiving_review`); credits, freight claims, recounts; receiving evaluation | after step 9 |
+| Store receiving problems | built, Claude decides: stores report what arrived; short or damaged deliveries are traced to the warehouse, the carrier or the store's count, by rules or Claude (`receiving_review`); credits, freight claims, recounts; receiving evaluation | after step 9 |
 | Audit_Service | done | R10.1, R10.2, R10.3, R10.5, R10.6, R10.7 |
 | Approval_Workflow | done | R8.1 to R8.8 |
 | Data_Governance_Service | done (isolation + masking) | R9.1, R9.2, R9.4, R9.6, R9.7, R9.8 |

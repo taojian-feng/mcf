@@ -195,7 +195,7 @@ def test_the_credit_lands_on_the_invoice():
 def test_short_deliveries_are_reported_and_investigated_end_to_end():
     hot = (("mis_pick", 0.15), ("short_pick", 0.15), ("carrier_damage", 0.15), ("carrier_loss", 0.15))
     with build_world(catalog_size=12, orders_per_day=40, corpc=True, corpc_size=12, truck_fates=hot,
-                     miscount_scale=3) as w:
+                     miscount_scale=3, config_overrides={"receiving_review": "rules"}) as w:
         for _ in range(10):
             w.run(hours=24, step_min=20)
             w.system.run_job("reconciliation_daily")
