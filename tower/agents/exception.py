@@ -65,6 +65,13 @@ def order_evidence(order: dict | None) -> dict | None:
     return {k: order.get(k) for k in ORDER_EVIDENCE} if order else None
 
 
+def agent_finding(c: Classification) -> dict:
+    """What the agent concluded from the order's full record, carried on its approval request so the brief
+    (and the person) can weigh the agent's investigation instead of starting from the signal alone."""
+    return {"category": c.category.value if c.category else None, "confidence": round(c.confidence, 2),
+            "rationale": c.rationale}
+
+
 class Classifier:
     """Rules first; with Claude, investigate. Given the order's record, Claude weighs the signal against the
     order's history (a failed delivery attempt and a late parcel both raise a promise breach, and only the
@@ -271,7 +278,8 @@ class ExceptionAgent:
             category=ApprovalCategory.EXCEPTION_RESOLUTION, owning_party=party, agent=AGENT,
             subject_id=case.case_id,
             content={"order_id": case.signal.order_id, "playbook": pb.playbook_id, "version": pb.version,
-                     "steps": list(pb.steps), "signal": case.signal.model_dump(mode="json")},
+                     "steps": list(pb.steps), "signal": case.signal.model_dump(mode="json"),
+                     "agent_finding": agent_finding(case.classification)},
             rationale=case.classification.rationale, tenant_id=case.tenant_id,
         )
         case.approval_id, case.status = item.approval_id, ExceptionStatus.AWAITING_APPROVAL

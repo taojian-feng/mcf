@@ -1,4 +1,5 @@
 """The exception evaluation runs end to end on a short simulated window, with a stand-in for Claude."""
+import json
 import threading
 
 from evals.exceptions import ARMS, NONE, collect, report, score
@@ -155,3 +156,30 @@ def test_autonomy_eval_asks_only_what_the_agent_would_ask():
     asks = agent_requests([sample(1, "gone sure"), sample(2, "gone"), sample(3, "late sure"),
                            sample(1, "gone sure")], Agent(), threshold=0.7)
     assert [s.signal.order_id for s in asks] == ["o1"]          # sure and lost, once per order
+    assert asks[0].finding == {"category": "lost_shipment", "confidence": 0.9, "rationale": "record"}
+
+
+def test_autonomy_eval_briefs_see_the_agents_finding():
+    from evals.autonomy import replay
+    from evals.exceptions import Sample
+    from tower.core.models import UnhappyPathSignal
+
+    class Judge:
+        def __init__(self):
+            self.prompts = []
+
+        def structured(self, *, system, prompt, schema):
+            self.prompts.append(json.loads(prompt))
+            return schema.model_validate({
+                "summary": "s", "if_approved": "a", "if_rejected": "r", "key_numbers": [], "check_first": [],
+                "suggestion": "look_closer", "suggestion_reason": "r"})
+
+    finding = {"category": "lost_shipment", "confidence": 0.92, "rationale": "no scan for 9 days"}
+    judge = Judge()
+    replay([Sample(UnhappyPathSignal(signal_type="carrier_lost", source="t", order_id="o1"), {"state": "x"},
+                   "lost_shipment", finding),
+            Sample(UnhappyPathSignal(signal_type="carrier_lost", source="t", order_id="o2"), {"state": "x"},
+                   "lost_shipment")], judge)
+    first, second = (p["request"] for p in judge.prompts)
+    assert first["content"]["agent_finding"] == finding and first["rationale"] == "no scan for 9 days"
+    assert "agent_finding" not in second["content"]
