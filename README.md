@@ -1,6 +1,6 @@
 # Logistics Control Tower
 
-A multi-agent control tower for Corp A, a logistics provider that fulfills online and offline demand for retail clients. Corp B is the first client; orders reach Corp A's Multi-Channel Fulfillment (MCF) API. The direction is set out in the [design review](https://claude.ai/code/artifact/2dcfb7c4-a6a2-4bfa-9802-7bb6a2d89361). The core is cloud-agnostic, Azure is the first cloud, and GCP and AWS come later as adapter packages. The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+A multi-agent control tower for Corp A, a logistics provider that fulfills online and offline demand for retail clients. Corp B is the first client; orders reach Corp A's control tower (CT) API. The direction is set out in the [design review](https://claude.ai/code/artifact/2dcfb7c4-a6a2-4bfa-9802-7bb6a2d89361). The core is cloud-agnostic, Azure is the first cloud, and GCP and AWS come later as adapter packages. The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Run it locally
 
