@@ -7,7 +7,7 @@
 #
 # Each client is one entry under `clients:`. Its people see and approve only that client's work.
 
-default_email: "fengtaojian123@yahoo.com"
+default_email: "ct-user@company.com"
 
 clients:
   corp_b:                       # tenant one
